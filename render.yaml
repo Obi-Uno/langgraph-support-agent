@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: support-agent-demo
+    env: docker
+    plan: free
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AGENT_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: DATABASE_URL
+        value: sqlite:///./support_agent.db
+      - key: N8N_WEBHOOK_SECRET
+        sync: false
+      - key: ESCALATION_REFUND_THRESHOLD
+        value: "500"
