@@ -195,6 +195,83 @@ def test_broken_guard_model_fails_open():
     assert "order" in result["reply"].lower()
 
 
+def _write_action_script():
+    return [
+        AIMessage(content="", tool_calls=[
+            {
+                "name": "create_support_ticket",
+                "args": {"customer_email": "dave@example.com", "order_id": "ORD-1002", "subject": "Missing key"},
+                "id": "call_1",
+            }
+        ]),
+        AIMessage(content="I've created the ticket."),
+    ]
+
+
+def test_unclear_message_during_pause_reminds_without_touching_graph():
+    """Typing something other than approve/reject while paused must NOT
+    re-invoke the graph (which would re-propose the action) -- it should
+    return a reminder and keep the same pending approval."""
+    from app.agent import build_graph as bg
+
+    fake_llm = FakeToolCallingLLM(_write_action_script())
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    first = run_agent("my keyboard is missing a key, open a ticket", session_id="s8", graph=graph)
+    assert first["pending_approval"] is not None
+    assert fake_llm.call_count == 1
+
+    second = run_agent("create support ticket", session_id="s8", graph=graph)
+    assert second["pending_approval"] is not None
+    assert "waiting for your decision" in second["reply"]
+    assert fake_llm.call_count == 1  # graph was never re-invoked
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    count = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    db.close()
+    assert count == 0
+
+
+def test_typed_approve_during_pause_resumes_and_executes():
+    from app.agent import build_graph as bg
+
+    fake_llm = FakeToolCallingLLM(_write_action_script())
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("open a ticket for my broken keyboard", session_id="s9", graph=graph)
+    result = run_agent("yes, approve it", session_id="s9", graph=graph)
+
+    assert result["pending_approval"] is None
+    assert "ticket" in result["reply"].lower()
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    count = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    db.close()
+    assert count == 1
+
+
+def test_typed_reject_during_pause_resumes_without_executing():
+    from app.agent import build_graph as bg
+
+    script = _write_action_script()
+    script[1] = AIMessage(content="Understood, I won't create the ticket.")
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("open a ticket for my broken keyboard", session_id="s10", graph=graph)
+    result = run_agent("no, cancel that", session_id="s10", graph=graph)
+
+    assert result["pending_approval"] is None
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    count = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    db.close()
+    assert count == 0
+
+
 def test_conversation_memory_persists_across_turns():
     """Second call with the same session_id should retain the first message
     in state -- proving the checkpointer is actually wiring up memory."""

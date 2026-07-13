@@ -250,6 +250,9 @@ function showTyping() {
 
 /* ---------- approval card ---------- */
 function addApprovalCard(pendingApproval) {
+  // Only one live approval card at a time -- a re-sent pending_approval
+  // (e.g. after a reminder) replaces the old card instead of stacking.
+  document.querySelectorAll('.approval-card').forEach(c => c.remove());
   const card = document.createElement('div');
   card.className = 'approval-card';
 
@@ -406,7 +409,13 @@ function sendMessage(message) {
       typing.remove();
       sessionId = data.session_id;
       addBubble(data.reply, 'agent', data.escalated);
-      if (data.pending_approval) addApprovalCard(data.pending_approval);
+      if (data.pending_approval) {
+        addApprovalCard(data.pending_approval);
+      } else {
+        // pending action resolved via a typed approve/reject -- drop the
+        // now-stale card so its buttons can't fire on a finished action
+        document.querySelectorAll('.approval-card').forEach(c => c.remove());
+      }
       refreshAudit();
     })
     .catch(() => {

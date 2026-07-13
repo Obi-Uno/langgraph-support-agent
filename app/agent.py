@@ -24,6 +24,7 @@ pattern too -- the underlying architecture is framework-agnostic, LangGraph
 is just the most commonly requested keyword in client postings.
 """
 import os
+import re
 import uuid
 from typing import TypedDict, Annotated, Optional
 
@@ -312,6 +313,30 @@ def _extract_pending_approval(graph, config):
     return None
 
 
+_APPROVE_RE = re.compile(r"\b(approve|approved|yes|yep|yeah|confirm|go ahead|do it|okay|ok|sure)\b")
+_REJECT_RE = re.compile(r"\b(reject|rejected|no|nope|cancel|deny|dont|don'?t|stop)\b")
+
+PENDING_REMINDER = (
+    "There's an action above waiting for your decision -- click Approve or "
+    "Reject on the card, or reply 'approve' / 'reject'. I'll get to your "
+    "message right after."
+)
+
+
+def _classify_decision(message: str):
+    """Map a free-text reply on a paused session to approve/reject/unclear.
+    Deliberately conservative: if both kinds of words appear ('no wait, yes
+    approve it'), treat as unclear and ask again rather than guess."""
+    lowered = message.lower()
+    approves = bool(_APPROVE_RE.search(lowered))
+    rejects = bool(_REJECT_RE.search(lowered))
+    if approves and not rejects:
+        return "approve"
+    if rejects and not approves:
+        return "reject"
+    return None
+
+
 def _log_interrupt(session_id, pending):
     """The interrupt fires BEFORE the await_approval node runs, so nothing is
     in the audit trail yet at pause time -- log the pause itself so the trail
@@ -333,6 +358,30 @@ def run_agent(user_message, session_id=None, graph=None):
     session_id = session_id or str(uuid.uuid4())
     graph = graph or get_graph()
     config = {"configurable": {"thread_id": session_id}}
+
+    # If this session is paused at the approval interrupt, a new chat message
+    # must NOT re-invoke the frozen graph (that would merge the message into
+    # the interrupted run and re-propose the action). Instead, read the
+    # message AS the decision, or remind the user a decision is pending.
+    pending = _extract_pending_approval(graph, config)
+    if pending:
+        decision = _classify_decision(user_message)
+        if decision is not None:
+            return resume_agent(session_id, decision == "approve", graph)
+        db = SessionLocal()
+        try:
+            log_event(
+                db, session_id, "awaiting_approval",
+                f"Message received while paused; asked for an explicit decision. Message: {user_message!r}",
+            )
+        finally:
+            db.close()
+        return {
+            "session_id": session_id,
+            "reply": PENDING_REMINDER,
+            "escalated": False,
+            "pending_approval": pending,
+        }
 
     result = graph.invoke({
         "messages": [HumanMessage(content=user_message)],

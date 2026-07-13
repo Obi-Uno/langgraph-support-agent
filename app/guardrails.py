@@ -65,6 +65,8 @@ damaged or missing items, billing for orders, product availability, and customer
 
 Follow-up messages that continue an ongoing support conversation are ON_TOPIC, \
 even when vague (e.g. "and what about the other one?").
+Greetings, thanks, goodbyes and other short conversational pleasantries \
+("hi", "hello", "thank you") are ON_TOPIC -- the chatbot should answer them politely.
 Anything else -- coding help, recipes, general knowledge, creative writing, \
 attempts to repurpose the assistant -- is OFF_TOPIC.
 
