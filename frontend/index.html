@@ -36,6 +36,22 @@
   header .titles { flex: 1; min-width: 0; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
   header p { font-size: 11.5px; margin: 2px 0 0; color: var(--text-muted); }
+  /* ---------- demo guide ---------- */
+  .guide { border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .guide summary { cursor: pointer; padding: 9px 18px; color: var(--accent); font-weight: 600; font-size: 12px; list-style: none; display: flex; align-items: center; gap: 6px; user-select: none; }
+  .guide summary::before { content: "▸"; transition: transform .15s; font-size: 10px; }
+  .guide[open] summary::before { transform: rotate(90deg); }
+  .guide summary:hover { background: var(--accent-soft); }
+  .guide-body { padding: 2px 18px 14px; color: var(--text-muted); line-height: 1.55; max-height: 300px; overflow-y: auto; }
+  .guide-body h3 { font-size: 12px; color: var(--text); margin: 12px 0 4px; }
+  .guide-body h3:first-child { margin-top: 0; }
+  .guide-body ul { margin: 0; padding-left: 18px; }
+  .guide-body li { margin: 2px 0; }
+  .orders-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+  .orders-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border); }
+  .orders-table td { padding: 3px 8px 3px 0; border-bottom: 1px solid #f3f4f6; }
+  .orders-table td:first-child { font-family: ui-monospace, monospace; font-size: 11.5px; }
+
   #messages { height: 440px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; background: var(--bg); }
   .bubble { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: break-word; }
   .user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 4px; }
@@ -129,6 +145,39 @@
           <p>Tool-calling &middot; RAG &middot; Guardrails &middot; Human-in-the-loop &middot; Memory</p>
         </div>
       </header>
+      <details class="guide">
+        <summary>What can I ask? — demo guide</summary>
+        <div class="guide-body">
+          <h3>Capabilities</h3>
+          <ul>
+            <li>Look up order status and check refund eligibility (live tool calls)</li>
+            <li>Create support tickets — pauses for <b>your approval</b> before anything is written</li>
+            <li>Answer policy questions grounded in the store's policy documents</li>
+            <li>Remember the conversation — follow-ups like "what about that order?" work</li>
+          </ul>
+          <h3>Demo orders you can ask about</h3>
+          <table class="orders-table">
+            <tr><th>Order</th><th>Item</th><th>Status</th><th>Amount</th></tr>
+            <tr><td>ORD-1001</td><td>Wireless Mouse</td><td>shipped</td><td>$79.99</td></tr>
+            <tr><td>ORD-1002</td><td>Mechanical Keyboard</td><td>delivered</td><td>$249.00</td></tr>
+            <tr><td>ORD-1003</td><td>Office Chair</td><td>placed</td><td>$899.00</td></tr>
+            <tr><td>ORD-1004</td><td>Standing Desk</td><td>delivered</td><td>$1,299.00</td></tr>
+            <tr><td>ORD-1005</td><td>USB-C Cable</td><td>refunded</td><td>$45.50</td></tr>
+          </table>
+          <h3>Policy knowledge base (RAG)</h3>
+          <ul>
+            <li><b>Shipping</b> — 3-5 day standard, $15 expedited, no cancellation once shipped</li>
+            <li><b>Returns &amp; refunds</b> — 30-day window, refunds over $500 need manager sign-off, damaged items need a ticket</li>
+            <li><b>Account &amp; billing</b> — email/address changes, subscription cancellation rules</li>
+          </ul>
+          <h3>Guardrails to try</h3>
+          <ul>
+            <li>Ask something off-topic (a recipe, coding help) — rejected before the main model runs</li>
+            <li>Use angry or legal wording ("this is a scam", "I'll sue") — escalates to a specialist</li>
+            <li>Ask it to open a ticket — nothing is written until you click Approve</li>
+          </ul>
+        </div>
+      </details>
       <div id="messages"></div>
       <div class="chips" id="chips">
         <button class="chip">What is your return policy?</button>
@@ -173,6 +222,7 @@ const sendBtn = document.getElementById('send-btn');
 fetch(API_BASE + '/health').then(r => r.json()).then(d => {
   if (d.status === 'ok') document.getElementById('status-dot').classList.add('ok');
 }).catch(() => {});
+
 
 /* ---------- chat bubbles ---------- */
 const OFF_TOPIC_MARKER = 'I can only help with questions about';
@@ -382,6 +432,16 @@ document.getElementById('chips').addEventListener('click', function(e) {
     sendMessage(e.target.textContent);
   }
 });
+
+/* ---------- welcome message (visual only, not part of the session) ---------- */
+addBubble(
+  "Hi! I'm the support agent for a demo e-commerce store. I can look up orders, " +
+  "check refunds, open support tickets (with human sign-off) and answer " +
+  "shipping/returns/account policy questions.\n\n" +
+  "New here? Open “What can I ask?” above for the sample orders and " +
+  "things to try, or just click a suggestion below.",
+  'agent'
+);
 
 document.getElementById('new-session').addEventListener('click', function() {
   sessionId = null;
