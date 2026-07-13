@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+support_agent.db
+checkpoints.db*
+chroma_store/
+.pytest_cache/
+pytest-cache-files-*/
+venv/
+.claude/
+.DS_Store
