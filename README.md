@@ -6,7 +6,8 @@ agentic-AI work: tool-calling with guardrails, retrieval-grounded answers,
 human-in-the-loop approval on write actions, multi-turn memory, and human
 escalation when a case is out of scope.
 
-**Live demo:** _add your deployed URL here_
+**Live demo:** https://support-agent-demo.onrender.com — free tier, first
+request after idle takes ~30-60s to wake, then it's fast.
 **Walkthrough video:** _add your 60-90s Loom/YouTube link here_
 
 ## What it does
