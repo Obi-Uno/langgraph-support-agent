@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Support Agent Demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  :root {
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --bg: #f3f4f6;
+    --surface: #ffffff;
+    --border: #e5e7eb;
+    --text: #111827;
+    --text-muted: #6b7280;
+    --green: #16a34a;
+    --red: #dc2626;
+    --amber: #d97706;
+    --purple: #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    margin: 0; padding: 24px 16px;
+    display: flex; justify-content: center;
+  }
+  .layout { display: flex; gap: 16px; width: 100%; max-width: 1060px; align-items: flex-start; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+
+  /* ---------- chat panel ---------- */
+  .chat-panel { flex: 0 0 480px; display: flex; flex-direction: column; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; flex-shrink: 0; }
+  .status-dot.ok { background: var(--green); }
+  header .titles { flex: 1; min-width: 0; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header p { font-size: 11.5px; margin: 2px 0 0; color: var(--text-muted); }
+  #messages { height: 440px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; background: var(--bg); }
+  .bubble { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: break-word; }
+  .user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 4px; }
+  .agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .agent.escalated { border-color: #fcd34d; background: #fffbeb; }
+  .agent.blocked { border-color: #fca5a5; background: #fef2f2; }
+
+  .typing { align-self: flex-start; display: flex; gap: 4px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; border-bottom-left-radius: 4px; }
+  .typing span { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; animation: blink 1.2s infinite; }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+
+  /* ---------- approval card ---------- */
+  .approval-card { align-self: stretch; background: var(--surface); border: 1px solid #c4b5fd; border-radius: 12px; overflow: hidden; }
+  .approval-head { background: #f5f3ff; padding: 10px 14px; display: flex; align-items: center; gap: 8px; }
+  .approval-head .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--purple); animation: pulsedot 1.4s infinite; flex-shrink: 0; }
+  @keyframes pulsedot { 0%,100% { box-shadow: 0 0 0 0 rgba(124,58,237,0.35);} 50% { box-shadow: 0 0 0 5px rgba(124,58,237,0);} }
+  .approval-head .t { font-size: 13px; font-weight: 600; color: #5b21b6; }
+  .approval-body { padding: 12px 14px; }
+  .approval-note { font-size: 12px; color: var(--text-muted); margin: 0 0 10px; line-height: 1.45; }
+  .tool-call { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+  .tool-name { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; font-weight: 600; padding: 6px 10px; background: #f9fafb; border-bottom: 1px solid var(--border); }
+  .tool-args { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .tool-args td { padding: 5px 10px; border-top: 1px solid #f3f4f6; vertical-align: top; }
+  .tool-args td:first-child { color: var(--text-muted); white-space: nowrap; width: 1%; font-family: ui-monospace, monospace; }
+  .tool-args tr:first-child td { border-top: none; }
+  .approval-actions { display: flex; gap: 8px; }
+  .approval-actions button { flex: 1; padding: 9px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .approve-btn { background: var(--green); border: 1px solid var(--green); color: white; }
+  .reject-btn { background: white; border: 1px solid #fca5a5; color: var(--red); }
+  .approval-actions button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .decision-note { align-self: stretch; font-size: 12px; color: var(--text-muted); padding: 8px 12px; border: 1px dashed var(--border); border-radius: 10px; }
+  .decision-note.approved { color: var(--green); border-color: #bbf7d0; background: #f0fdf4; }
+  .decision-note.rejected { color: var(--red); border-color: #fecaca; background: #fef2f2; }
+
+  /* ---------- chips + form ---------- */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0; }
+  .chip { font-size: 11.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer; transition: all .12s; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  form { display: flex; gap: 8px; padding: 12px 14px 14px; }
+  input { flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; outline: none; }
+  input:focus { border-color: var(--accent); }
+  .send-btn { background: var(--accent); color: white; border: none; padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .send-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  /* ---------- audit panel ---------- */
+  .audit-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .audit-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; }
+  .audit-head .titles { flex: 1; }
+  .audit-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
+  .audit-head p { font-size: 11.5px; margin: 2px 0 0; color: var(--text-muted); }
+  .new-session { font-size: 11.5px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer; }
+  .new-session:hover { border-color: var(--accent); color: var(--accent); }
+  #audit { height: 508px; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 0; }
+  .audit-empty { font-size: 12.5px; color: var(--text-muted); line-height: 1.6; padding-top: 8px; }
+  .event { display: flex; gap: 10px; position: relative; padding-bottom: 14px; }
+  .event::before { content: ""; position: absolute; left: 5px; top: 16px; bottom: 0; width: 1px; background: var(--border); }
+  .event:last-child::before { display: none; }
+  .event-dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; border: 2px solid; background: white; }
+  .event-content { min-width: 0; flex: 1; }
+  .event-tag { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em; padding: 1px 7px; border-radius: 999px; margin-bottom: 3px; }
+  .event-detail { font-size: 12px; color: var(--text-muted); line-height: 1.5; overflow-wrap: break-word; }
+  .event-detail.mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; background: #f9fafb; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-top: 2px; }
+  .event-time { font-size: 10.5px; color: #9ca3af; margin-left: 6px; }
+
+  .ev-response       { --c: var(--green);  }
+  .ev-tool_call      { --c: var(--accent); }
+  .ev-escalation     { --c: var(--amber);  }
+  .ev-guardrail_block{ --c: var(--red);    }
+  .ev-awaiting_approval { --c: var(--purple); }
+  .ev-write_action_rejected { --c: var(--red); }
+  .event-dot { border-color: var(--c, #9ca3af); }
+  .event-tag { background: color-mix(in srgb, var(--c, #9ca3af) 12%, white); color: var(--c, #6b7280); }
+
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    .chat-panel { flex: none; width: 100%; }
+    #audit { height: 300px; }
+  }
+</style>
+</head>
+<body>
+  <div class="layout">
+
+    <div class="panel chat-panel">
+      <header>
+        <div class="status-dot" id="status-dot" title="backend status"></div>
+        <div class="titles">
+          <h1>Acme Support Agent</h1>
+          <p>Tool-calling &middot; RAG &middot; Guardrails &middot; Human-in-the-loop &middot; Memory</p>
+        </div>
+      </header>
+      <div id="messages"></div>
+      <div class="chips" id="chips">
+        <button class="chip">What is your return policy?</button>
+        <button class="chip">Where is order ORD-1001?</button>
+        <button class="chip">My chair from ORD-1003 arrived damaged, open a ticket</button>
+        <button class="chip">What's a good pasta recipe?</button>
+      </div>
+      <form id="chat-form">
+        <input id="chat-input" placeholder="Ask about an order, refund, or policy..." autocomplete="off" />
+        <button type="submit" class="send-btn" id="send-btn">Send</button>
+      </form>
+    </div>
+
+    <div class="panel audit-panel">
+      <div class="audit-head">
+        <div class="titles">
+          <h2>Behind the scenes</h2>
+          <p id="audit-sub">Live audit trail &mdash; every guardrail decision, tool call and approval is logged</p>
+        </div>
+        <button class="new-session" id="new-session">New session</button>
+      </div>
+      <div id="audit"><div class="audit-empty">Send a message to watch the agent pipeline work:<br><br>
+        &bull; <b>guardrail block</b> &mdash; off-topic queries are rejected by a cheap classifier before the main LLM ever runs<br>
+        &bull; <b>tool call</b> &mdash; read-only lookups execute instantly<br>
+        &bull; <b>awaiting approval</b> &mdash; write actions pause the graph until a human decides<br>
+        &bull; <b>escalation</b> &mdash; angry/legal language or big refunds route to a specialist
+      </div></div>
+    </div>
+
+  </div>
+
+<script>
+const API_BASE = window.location.origin;
+let sessionId = null;
+const messagesEl = document.getElementById('messages');
+const auditEl = document.getElementById('audit');
+const form = document.getElementById('chat-form');
+const input = document.getElementById('chat-input');
+const sendBtn = document.getElementById('send-btn');
+
+/* ---------- backend status ---------- */
+fetch(API_BASE + '/health').then(r => r.json()).then(d => {
+  if (d.status === 'ok') document.getElementById('status-dot').classList.add('ok');
+}).catch(() => {});
+
+/* ---------- chat bubbles ---------- */
+const OFF_TOPIC_MARKER = 'I can only help with questions about';
+
+function addBubble(text, sender, escalated) {
+  const div = document.createElement('div');
+  let cls = 'bubble ' + sender;
+  if (escalated) cls += ' escalated';
+  if (sender === 'agent' && text.startsWith(OFF_TOPIC_MARKER)) cls += ' blocked';
+  div.className = cls;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function showTyping() {
+  const div = document.createElement('div');
+  div.className = 'typing';
+  div.innerHTML = '<span></span><span></span><span></span>';
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+/* ---------- approval card ---------- */
+function addApprovalCard(pendingApproval) {
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+
+  const head = document.createElement('div');
+  head.className = 'approval-head';
+  head.innerHTML = '<div class="pulse"></div><div class="t">Human approval required</div>';
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'approval-body';
+
+  const note = document.createElement('p');
+  note.className = 'approval-note';
+  note.textContent = 'The agent wants to run a write action. The workflow is paused — nothing touches the database until you decide.';
+  body.appendChild(note);
+
+  pendingApproval.tool_calls.forEach(function(call) {
+    const box = document.createElement('div');
+    box.className = 'tool-call';
+    const name = document.createElement('div');
+    name.className = 'tool-name';
+    name.textContent = call.name;
+    box.appendChild(name);
+    const table = document.createElement('table');
+    table.className = 'tool-args';
+    Object.entries(call.args).forEach(function([k, v]) {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td');
+      td1.textContent = k;
+      const td2 = document.createElement('td');
+      td2.textContent = typeof v === 'string' ? v : JSON.stringify(v);
+      tr.appendChild(td1); tr.appendChild(td2);
+      table.appendChild(tr);
+    });
+    box.appendChild(table);
+    body.appendChild(box);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'approval-actions';
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'approve-btn';
+  approveBtn.textContent = 'Approve';
+  approveBtn.onclick = function() { respondToApproval(true, card); };
+  const rejectBtn = document.createElement('button');
+  rejectBtn.className = 'reject-btn';
+  rejectBtn.textContent = 'Reject';
+  rejectBtn.onclick = function() { respondToApproval(false, card); };
+  actions.appendChild(approveBtn);
+  actions.appendChild(rejectBtn);
+  body.appendChild(actions);
+
+  card.appendChild(body);
+  messagesEl.appendChild(card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function respondToApproval(approved, card) {
+  card.querySelectorAll('button').forEach(b => b.disabled = true);
+  const typing = showTyping();
+
+  fetch(API_BASE + '/approve/' + sessionId, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved: approved }),
+  })
+    .then(res => res.json())
+    .then(data => {
+      typing.remove();
+      const note = document.createElement('div');
+      note.className = 'decision-note ' + (approved ? 'approved' : 'rejected');
+      note.textContent = approved
+        ? '✓ Approved by reviewer — action executed'
+        : '✕ Rejected by reviewer — action was never executed';
+      card.replaceWith(note);
+      addBubble(data.reply, 'agent', data.escalated);
+      if (data.pending_approval) addApprovalCard(data.pending_approval);
+      refreshAudit();
+    })
+    .catch(() => {
+      typing.remove();
+      card.querySelectorAll('button').forEach(b => b.disabled = false);
+      addBubble('Error reaching the agent while resuming.', 'agent');
+    });
+}
+
+/* ---------- audit trail ---------- */
+const EVENT_LABELS = {
+  response: 'response',
+  tool_call: 'tool call',
+  escalation: 'escalation',
+  guardrail_block: 'guardrail block',
+  awaiting_approval: 'awaiting approval',
+  write_action_rejected: 'write rejected',
+};
+
+function refreshAudit() {
+  if (!sessionId) return;
+  fetch(API_BASE + '/audit-log/' + sessionId)
+    .then(res => res.json())
+    .then(entries => {
+      if (!entries.length) return;
+      auditEl.innerHTML = '';
+      entries.forEach(e => {
+        const ev = document.createElement('div');
+        ev.className = 'event ev-' + e.event_type;
+
+        const dot = document.createElement('div');
+        dot.className = 'event-dot';
+        ev.appendChild(dot);
+
+        const content = document.createElement('div');
+        content.className = 'event-content';
+
+        const tag = document.createElement('span');
+        tag.className = 'event-tag';
+        tag.textContent = EVENT_LABELS[e.event_type] || e.event_type;
+        content.appendChild(tag);
+
+        const time = document.createElement('span');
+        time.className = 'event-time';
+        time.textContent = new Date(e.created_at).toLocaleTimeString();
+        content.appendChild(time);
+
+        const detail = document.createElement('div');
+        detail.className = 'event-detail' + (e.event_type === 'tool_call' ? ' mono' : '');
+        detail.textContent = e.detail;
+        content.appendChild(detail);
+
+        ev.appendChild(content);
+        auditEl.appendChild(ev);
+      });
+      auditEl.scrollTop = auditEl.scrollHeight;
+      document.getElementById('audit-sub').textContent = 'Session ' + sessionId.slice(0, 8) + '… — ' + entries.length + ' logged events';
+    })
+    .catch(() => {});
+}
+
+/* ---------- send flow ---------- */
+function sendMessage(message) {
+  addBubble(message, 'user');
+  input.value = '';
+  sendBtn.disabled = true;
+  input.disabled = true;
+  const typing = showTyping();
+
+  fetch(API_BASE + '/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: message, session_id: sessionId }),
+  })
+    .then(res => res.json())
+    .then(data => {
+      typing.remove();
+      sessionId = data.session_id;
+      addBubble(data.reply, 'agent', data.escalated);
+      if (data.pending_approval) addApprovalCard(data.pending_approval);
+      refreshAudit();
+    })
+    .catch(() => {
+      typing.remove();
+      addBubble('Error reaching the agent. Is the backend running?', 'agent');
+    })
+    .finally(() => {
+      sendBtn.disabled = false;
+      input.disabled = false;
+      input.focus();
+    });
+}
+
+form.addEventListener('submit', function(e) {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message || sendBtn.disabled) return;
+  sendMessage(message);
+});
+
+document.getElementById('chips').addEventListener('click', function(e) {
+  if (e.target.classList.contains('chip') && !sendBtn.disabled) {
+    sendMessage(e.target.textContent);
+  }
+});
+
+document.getElementById('new-session').addEventListener('click', function() {
+  sessionId = null;
+  messagesEl.innerHTML = '';
+  auditEl.innerHTML = '<div class="audit-empty">New session started — send a message to begin.</div>';
+  document.getElementById('audit-sub').textContent = 'Live audit trail — every guardrail decision, tool call and approval is logged';
+  input.focus();
+});
+</script>
+</body>
+</html>
