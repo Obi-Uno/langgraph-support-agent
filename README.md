@@ -23,12 +23,19 @@ escalation when a case is out of scope.
 - **Remembers the conversation across turns** via a LangGraph checkpointer keyed
   on session ID, so follow-up questions ("what about that order I just asked
   about") work correctly instead of every message being stateless.
+- **Rejects off-topic queries before the main LLM ever runs** -- a relevance
+  gate (a cheap, fast classifier model) checks every message against the
+  support domain, so "write me a python script" gets a polite canned refusal
+  instead of burning tokens, and the endpoint can't be repurposed as a free
+  LLM proxy. Fails open: if the gate model errors, the query still goes through.
 - Escalates to a human when the conversation shows risk signals: angry sentiment,
   legal language, or a refund above a configurable threshold.
 - Runs a grounding check on its own final response before returning it, flagging
   any claim not backed by real tool output.
 - Logs every decision -- tool call, guardrail block, approval, escalation,
-  response -- to an audit trail, queryable per conversation.
+  response -- to an audit trail, queryable per conversation. The demo frontend
+  renders it live in a "behind the scenes" panel next to the chat, so you can
+  watch the pipeline work in real time.
 - Exposes an `n8n`-compatible webhook, so the same agent can sit behind a
   no-code automation workflow instead of only a custom frontend.
 
@@ -36,9 +43,10 @@ escalation when a case is out of scope.
 
 ```mermaid
 flowchart TD
-    U[User message] --> R[Retrieve policy context + risk check]
+    U[User message] --> R[Risk check + relevance gate]
     R -->|escalation trigger| ESC[Escalate to human]
-    R -->|no trigger| M[LLM: decide response or tool call]
+    R -->|off-topic| OT[Canned refusal - main LLM never runs]
+    R -->|on-topic| M[LLM: decide response or tool call]
     M -->|read-only tool call| T[Execute tool]
     M -->|write tool call| WAIT[Pause: await human approval]
     M -->|no tool call| GC[Grounding check]
@@ -46,6 +54,7 @@ flowchart TD
     T --> M
     GC --> OUT[Response to user]
     ESC --> OUT
+    OT --> OUT
 
     subgraph Memory
       CP[(LangGraph checkpointer, keyed by session_id)]
@@ -76,23 +85,27 @@ job postings, not because the architecture is framework-specific.
 | Layer          | Choice                          | Why |
 |----------------|----------------------------------|-----|
 | API            | FastAPI                         | async, auto-docs at `/docs` |
-| Agent          | LangGraph + Claude               | tool-calling loop with explicit guardrail + approval nodes |
-| Memory         | LangGraph `MemorySaver` checkpointer | multi-turn conversation state, keyed by session_id (swap for `SqliteSaver` to survive restarts) |
+| Agent          | LangGraph, provider-switchable LLM (`LLM_PROVIDER`: Groq llama-3.3-70b default, or Gemini / Claude) | tool-calling loop with explicit guardrail + approval nodes; free-tier friendly for demos, swap one env var for production Claude |
+| Relevance gate | Separate small model (Groq llama-3.1-8b-instant) | topic classification is too fuzzy for keywords; a cheap second model gates traffic without touching the main model's rate limits |
+| Memory         | LangGraph `SqliteSaver` checkpointer | multi-turn conversation state AND paused approvals survive server restarts, keyed by session_id |
 | Storage        | SQLite (swap `DATABASE_URL` for Postgres/Neon) | zero external dependency, no region-block risk |
 | Retrieval      | scikit-learn TF-IDF              | no embedding-model download at runtime, deploys fast |
-| Frontend       | Plain HTML/JS chat widget         | embeddable in one file, includes an Approve/Reject UI for the HITL flow |
+| Frontend       | Plain HTML/JS, chat + live audit panel | single file, Approve/Reject cards for the HITL flow, real-time audit trail visualization |
 | Automation hook| `/webhook/n8n` endpoint           | bridges custom-agent and no-code-automation client requests |
 
 ## Running locally
 
 ```bash
-git clone <this-repo>
-cd support-agent
-python -m venv venv && source venv/bin/activate
+git clone https://github.com/Obi-Uno/langgraph-support-agent.git
+cd langgraph-support-agent
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env   # then add your ANTHROPIC_API_KEY
+cp .env.example .env   # then set GROQ_API_KEY (free at console.groq.com)
 uvicorn app.main:app --reload
 ```
+
+The default `.env.example` uses Groq's free tier (`LLM_PROVIDER=groq`). To run
+on Gemini or Claude instead, flip `LLM_PROVIDER` and fill the matching API key.
 
 Open http://localhost:8000 for the chat widget, or drive it directly:
 
@@ -119,8 +132,12 @@ Try these in the chat widget to see each capability:
   Approve/Reject card in the UI -- nothing is written until you click Approve
 - `"I want a refund on ORD-1004, this is unacceptable"` -> escalation (sentiment trigger)
 - `"What's your return policy for damaged items?"` -> RAG-grounded answer
+- `"What's a good pasta recipe?"` -> blocked by the relevance gate, main LLM never runs
 - Ask a follow-up in the same session (e.g. "is that the one I just asked about?")
   to see conversation memory working across turns
+
+Watch the "behind the scenes" panel while you do -- every guardrail decision,
+tool call, pause and approval appears in the audit trail as it happens.
 
 ## Tests
 
@@ -128,8 +145,9 @@ Try these in the chat widget to see each capability:
 pytest tests/ -v
 ```
 
-15 tests: guardrail logic, tool behavior, and -- notably -- the LangGraph
-plumbing itself (`tests/test_agent_flow.py`), using a scripted fake LLM so the
+18 tests: guardrail logic (including the relevance gate's block, pass and
+fail-open paths), tool behavior, and -- notably -- the LangGraph plumbing
+itself (`tests/test_agent_flow.py`), using scripted fake LLMs so the
 pause/approve/resume cycle and multi-turn memory are verified against real
 graph execution, not just guardrail functions in isolation. No API key or
 network access required to run any of these.
@@ -137,18 +155,19 @@ network access required to run any of these.
 ## Deployment
 
 **Render** (recommended, simplest): connect this repo, Render will pick up
-`render.yaml` automatically. Add your `ANTHROPIC_API_KEY` as a secret env var
+`render.yaml` automatically. Add your `GROQ_API_KEY` as a secret env var
 in the dashboard. Free tier works but sleeps after ~15 min idle (cold start
 ~20-40s); upgrade to the Starter plan (~$7/mo) for always-on.
 
 **Fly.io**: `fly launch --no-deploy`, review the generated config against
-`fly.toml`, then `fly secrets set ANTHROPIC_API_KEY=...` and `fly deploy`.
+`fly.toml`, then `fly secrets set GROQ_API_KEY=...` and `fly deploy`.
 
-Both configs default to SQLite on local disk and an in-memory checkpointer,
-which is fine for a demo but resets on redeploy or restart -- swap
+Conversation state (including paused approvals) persists in a SQLite-backed
+checkpointer, so it survives server restarts out of the box. Note that free
+hosting tiers use ephemeral disks: a *redeploy* resets both SQLite files
+(orders reseed automatically on startup). For long-term persistence swap
 `DATABASE_URL` for a hosted Postgres (Neon's free tier is a good, unblocked
-choice) and swap `MemorySaver` for `SqliteSaver`/a Postgres checkpointer if
-you want data and conversation memory to persist long-term.
+choice) and the checkpointer for its Postgres equivalent.
 
 ## n8n integration
 
