@@ -1,0 +1,14 @@
+.env
+venv/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+pytest-cache-files-*/
+support_agent.db
+checkpoints.db*
+chroma_store/
+.claude/
+test_api_key.py
+README.md
