@@ -45,6 +45,23 @@ def should_escalate(user_message: str, order_amount: float | None = None) -> tup
     return False, ""
 
 
+# Order IDs the demo store issues look like ORD-1001. In a real engagement this
+# regex is configured to the client's ID scheme. The point is that a
+# model-generated argument is checked for SHAPE, deterministically, before any
+# tool touches the database -- malformed junk ("unknown", "", an injection
+# string) dies at the boundary instead of hitting the DB or a human reviewer.
+ORDER_ID_RE = re.compile(r"^ORD-[A-Za-z0-9]+$")
+
+
+def validate_tool_args(tool_name: str, tool_args: dict) -> tuple[bool, str]:
+    """Deterministic shape validation applied to EVERY tool call (read or write)
+    before it executes. Returns (ok, reason_if_blocked)."""
+    order_id = (tool_args or {}).get("order_id")
+    if order_id is not None and not ORDER_ID_RE.match(str(order_id)):
+        return False, f"'{order_id}' is not a valid order ID (expected format ORD-XXXX)."
+    return True, ""
+
+
 def validate_write_action(tool_name: str, tool_args: dict) -> tuple[bool, str]:
     """Guard checks specifically for WRITE tools (e.g. creating tickets).
     Returns (allowed, reason_if_blocked).

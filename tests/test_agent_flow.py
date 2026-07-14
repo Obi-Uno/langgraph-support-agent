@@ -321,6 +321,32 @@ def test_typed_reject_during_pause_resumes_without_executing():
     assert count == 0
 
 
+def test_malformed_order_id_blocked_at_tool_boundary():
+    """A model-generated malformed order_id is refused before touching the DB;
+    the agent still recovers and replies."""
+    from app.agent import build_graph as bg
+
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "lookup_order", "args": {"order_id": "unknown"}, "id": "c1"}
+        ]),
+        AIMessage(content="Could you share your order number, e.g. ORD-1001?"),
+    ]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    result = run_agent("where is my stuff", session_id="s14", graph=graph)
+
+    assert result["pending_approval"] is None
+    assert "order number" in result["reply"].lower()
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    blocks = db.query(AuditLog).filter(AuditLog.event_type == "guardrail_block").count()
+    db.close()
+    assert blocks >= 1
+
+
 def test_conversation_memory_persists_across_turns():
     """Second call with the same session_id should retain the first message
     in state -- proving the checkpointer is actually wiring up memory."""

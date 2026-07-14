@@ -35,7 +35,10 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.tools import ALL_TOOLS
 from app.rag import retrieve_as_context
-from app.guardrails import should_escalate, validate_write_action, is_write_action, check_grounding, check_relevance
+from app.guardrails import (
+    should_escalate, validate_write_action, validate_tool_args, is_write_action,
+    check_grounding, check_relevance,
+)
 from app.db import SessionLocal, log_event
 
 # LLM_PROVIDER lets you swap the model backend without touching any agent
@@ -246,6 +249,15 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         try:
             for call in calls:
                 name, args, call_id = call["name"], call["args"], call["id"]
+
+                # Typed boundary: validate argument SHAPE before any tool runs.
+                shape_ok, shape_reason = validate_tool_args(name, args)
+                if not shape_ok:
+                    log_event(db, sid, "guardrail_block", shape_reason)
+                    tool_messages.append(
+                        ToolMessage(content=f"Action blocked by guardrail: {shape_reason}", tool_call_id=call_id)
+                    )
+                    continue
 
                 if is_write_action(name):
                     allowed, reason = validate_write_action(name, args)

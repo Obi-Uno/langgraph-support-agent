@@ -1,4 +1,22 @@
-from app.guardrails import should_escalate, validate_write_action, check_grounding
+from app.guardrails import (
+    should_escalate, validate_write_action, validate_tool_args, check_grounding,
+)
+
+
+def test_validate_tool_args_rejects_malformed_order_id():
+    ok, reason = validate_tool_args("lookup_order", {"order_id": "unknown"})
+    assert ok is False
+    assert "valid order ID" in reason
+
+
+def test_validate_tool_args_accepts_wellformed_order_id():
+    ok, _ = validate_tool_args("lookup_order", {"order_id": "ORD-1001"})
+    assert ok is True
+
+
+def test_validate_tool_args_ignores_calls_without_order_id():
+    ok, _ = validate_tool_args("some_tool", {"foo": "bar"})
+    assert ok is True
 
 
 def test_escalates_on_angry_keyword():
