@@ -62,6 +62,18 @@ def validate_tool_args(tool_name: str, tool_args: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def check_refund_threshold(amount) -> tuple[bool, str]:
+    """Hard, amount-based check run against the ACTUAL order amount from the DB
+    (not the model's opinion). Over the threshold -> manager escalation.
+    Returns (exceeds_threshold, reason)."""
+    if amount is not None and amount > REFUND_ESCALATION_THRESHOLD:
+        return True, (
+            f"Order amount ${amount:.2f} exceeds the ${REFUND_ESCALATION_THRESHOLD:.2f} "
+            f"threshold -- routing to a manager for sign-off."
+        )
+    return False, ""
+
+
 def validate_write_action(tool_name: str, tool_args: dict) -> tuple[bool, str]:
     """Guard checks specifically for WRITE tools (e.g. creating tickets).
     Returns (allowed, reason_if_blocked).

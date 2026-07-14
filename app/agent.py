@@ -37,9 +37,9 @@ from app.tools import ALL_TOOLS
 from app.rag import retrieve_as_context
 from app.guardrails import (
     should_escalate, validate_write_action, validate_tool_args, is_write_action,
-    check_grounding, check_relevance,
+    check_grounding, check_relevance, check_refund_threshold,
 )
-from app.db import SessionLocal, log_event
+from app.db import SessionLocal, log_event, Order
 
 # LLM_PROVIDER lets you swap the model backend without touching any agent
 # logic -- "gemini" or "groq" (both free-tier, good for local testing/demos)
@@ -104,6 +104,7 @@ SYSTEM_PROMPT = """You are a customer support agent for an e-commerce company.
 Rules you MUST follow:
 - Only state order/refund facts that came from a tool call result. Never guess or invent order data.
 - Only state policy facts that appear in the provided policy context below.
+- Before creating a support ticket about an order, you MUST first call lookup_order for that order in this conversation to confirm it exists. Never call create_support_ticket for an order you have not looked up.
 - If a refund or damaged-item issue needs human review, call create_support_ticket instead of promising a resolution yourself.
 - Be concise and friendly.
 
@@ -241,6 +242,8 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         last_ai: AIMessage = state["messages"][-1]
         tool_messages = []
         decision = state.get("pending_decision", "")
+        escalated = state.get("escalated", False)
+        escalation_reason = state.get("escalation_reason", "")
         verified = _verified_order_ids(state["messages"])
 
         # Reads before writes so that a lookup issued in the SAME batch can
@@ -268,21 +271,27 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                         )
                         continue
 
-                    # Sequencing invariant: never write for an order the agent
-                    # hasn't successfully looked up in this conversation. This
-                    # also blocks tickets for non-existent orders, since a
-                    # failed lookup never enters the verified set.
+                    # Existence gate: a write for an order requires that order to
+                    # exist -- verified deterministically in code, not left to the
+                    # model. Prefer the in-conversation lookup the agent normally
+                    # does (keeps its replies grounded); fall back to a direct DB
+                    # check so a real order isn't forced into a SECOND approval
+                    # just because the model proposed the write before looking up.
+                    # A non-existent order (the ORD-9999 case) is refused outright.
                     order_id = args.get("order_id")
                     if order_id and order_id not in verified:
-                        reason = (
-                            f"Blocked: {name} for order {order_id} without a prior successful "
-                            f"lookup of that order in this conversation."
-                        )
-                        log_event(db, sid, "guardrail_block", reason)
-                        tool_messages.append(
-                            ToolMessage(content=f"Action blocked by guardrail: {reason}", tool_call_id=call_id)
-                        )
-                        continue
+                        order_exists = db.query(Order).filter(Order.id == order_id).first() is not None
+                        if not order_exists:
+                            reason = (
+                                f"Blocked: {name} for order {order_id}, which does not exist. "
+                                f"Refusing to create a ticket for an unknown order."
+                            )
+                            log_event(db, sid, "guardrail_block", reason)
+                            tool_messages.append(
+                                ToolMessage(content=f"Action blocked by guardrail: {reason}", tool_call_id=call_id)
+                            )
+                            continue
+                        verified.add(order_id)
 
                     if decision != "approve":
                         decision_label = decision or "none"
@@ -298,6 +307,19 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                         )
                         continue
 
+                    # Hard, amount-based threshold: read the REAL order amount
+                    # from the DB and escalate over-threshold cases to a manager,
+                    # regardless of what the model decided. The ticket is still
+                    # created (it's the record), per policy.
+                    if order_id:
+                        order = db.query(Order).filter(Order.id == order_id).first()
+                        if order is not None:
+                            over, threshold_reason = check_refund_threshold(order.amount)
+                            if over:
+                                escalated = True
+                                escalation_reason = threshold_reason
+                                log_event(db, sid, "escalation", threshold_reason, escalated=True)
+
                     result = tools_by_name[name].invoke(args)
                     log_event(db, sid, "tool_call", f"{name}({args}) -> {result}")
                     tool_messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
@@ -310,7 +332,12 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                     tool_messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
         finally:
             db.close()
-        return {"messages": tool_messages, "pending_decision": ""}
+        return {
+            "messages": tool_messages,
+            "pending_decision": "",
+            "escalated": escalated,
+            "escalation_reason": escalation_reason,
+        }
 
     def ground_check(state: AgentState) -> AgentState:
         db = SessionLocal()

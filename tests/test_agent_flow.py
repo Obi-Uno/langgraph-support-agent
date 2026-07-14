@@ -122,6 +122,7 @@ def test_write_action_pauses_for_approval_then_executes_on_approve():
     second = resume_agent("s2", approved=True, graph=graph)
     assert second["pending_approval"] is None
     assert "ticket" in second["reply"].lower()
+    assert second["escalated"] is False  # $249 is under the refund threshold
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
@@ -152,9 +153,10 @@ def test_write_action_not_executed_on_reject():
     assert len(tickets) == 0
 
 
-def test_ticket_blocked_without_prior_lookup():
-    """Sequencing invariant: even for a real order, a ticket is refused if the
-    agent never looked the order up first -- enforced in code, not by the model."""
+def test_ticket_for_real_order_passes_existence_check_without_prior_lookup():
+    """A write for a REAL order is allowed even if the model proposed it before
+    looking up -- existence is verified directly at the boundary, so there's no
+    second approval. (A non-existent order is still blocked; see below.)"""
     from app.agent import build_graph as bg
 
     _seed_order("ORD-1002", amount=249.0)
@@ -164,21 +166,21 @@ def test_ticket_blocked_without_prior_lookup():
              "args": {"customer_email": "dave@example.com", "order_id": "ORD-1002", "subject": "Missing key"},
              "id": "c_ticket"}
         ]),
-        AIMessage(content="Okay."),
+        AIMessage(content="I've created the ticket."),
     ]
     fake_llm = FakeToolCallingLLM(script)
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     run_agent("open a ticket for ORD-1002", session_id="s11", graph=graph)
-    resume_agent("s11", approved=True, graph=graph)
+    result = resume_agent("s11", approved=True, graph=graph)
 
-    from app.db import SessionLocal, Ticket, AuditLog
+    assert result["pending_approval"] is None  # single approval, no re-prompt
+
+    from app.db import SessionLocal, Ticket
     db = SessionLocal()
     tickets = db.query(Ticket).count()
-    blocks = db.query(AuditLog).filter(AuditLog.event_type == "guardrail_block").count()
     db.close()
-    assert tickets == 0
-    assert blocks >= 1
+    assert tickets == 1
 
 
 def test_ticket_blocked_for_nonexistent_order():
@@ -345,6 +347,27 @@ def test_malformed_order_id_blocked_at_tool_boundary():
     blocks = db.query(AuditLog).filter(AuditLog.event_type == "guardrail_block").count()
     db.close()
     assert blocks >= 1
+
+
+def test_high_value_ticket_escalates_after_approval():
+    """Amount-based threshold enforced in code: a ticket for an over-threshold
+    order escalates to a manager regardless of the model, but is still created."""
+    from app.agent import build_graph as bg
+
+    _seed_order("ORD-1003", amount=899.0, email="bob@example.com")
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1003", email="bob@example.com"))
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("my chair is damaged, I want a refund", session_id="s15", graph=graph)
+    result = resume_agent("s15", approved=True, graph=graph)
+
+    assert result["escalated"] is True
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    n = db.query(Ticket).filter(Ticket.customer_email == "bob@example.com").count()
+    db.close()
+    assert n == 1  # ticket still created per policy
 
 
 def test_conversation_memory_persists_across_turns():

@@ -56,6 +56,15 @@ def test_allows_ticket_with_valid_email_and_subject():
     assert allowed is True
 
 
+def test_check_refund_threshold_over_and_under():
+    from app.guardrails import check_refund_threshold
+    over, reason = check_refund_threshold(899.00)
+    assert over is True
+    assert "threshold" in reason.lower()
+    under, _ = check_refund_threshold(49.00)
+    assert under is False
+
+
 def test_grounding_flags_unsupported_dollar_amount():
     grounded, reason = check_grounding(
         "Your refund of $9999.00 has been approved.", "Order ORD-1001: amount=$79.99"
