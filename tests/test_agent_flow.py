@@ -61,6 +61,31 @@ def temp_db(monkeypatch):
         pass
 
 
+def _seed_order(order_id, amount=249.0, email="dave@example.com"):
+    """Put a real order in the temp DB so a lookup of it succeeds."""
+    from app.db import SessionLocal, Order
+    db = SessionLocal()
+    db.add(Order(id=order_id, customer_email=email, status="delivered", amount=amount, item="Mechanical Keyboard"))
+    db.commit()
+    db.close()
+
+
+def _lookup_then_ticket_script(order_id, email="dave@example.com", final="I've created the ticket."):
+    """Realistic write flow the new sequencing rule requires: look the order up
+    first (verifies it), THEN propose the ticket, then a closing message."""
+    return [
+        AIMessage(content="", tool_calls=[
+            {"name": "lookup_order", "args": {"order_id": order_id}, "id": "c_lookup"}
+        ]),
+        AIMessage(content="", tool_calls=[
+            {"name": "create_support_ticket",
+             "args": {"customer_email": email, "order_id": order_id, "subject": "Missing key"},
+             "id": "c_ticket"}
+        ]),
+        AIMessage(content=final),
+    ]
+
+
 def test_read_only_tool_call_executes_without_approval():
     """lookup_order is read-only -- should NOT pause for approval."""
     from app.agent import build_graph as bg
@@ -84,17 +109,10 @@ def test_write_action_pauses_for_approval_then_executes_on_approve():
     """create_support_ticket is a WRITE action -- must pause for a human decision."""
     from app.agent import build_graph as bg
 
-    script = [
-        AIMessage(content="", tool_calls=[
-            {
-                "name": "create_support_ticket",
-                "args": {"customer_email": "bob@example.com", "order_id": "ORD-1003", "subject": "Item damaged"},
-                "id": "call_1",
-            }
-        ]),
-        AIMessage(content="I've created a ticket for you."),
-    ]
-    fake_llm = FakeToolCallingLLM(script)
+    _seed_order("ORD-1003", amount=249.0, email="bob@example.com")
+    fake_llm = FakeToolCallingLLM(
+        _lookup_then_ticket_script("ORD-1003", email="bob@example.com", final="I've created a ticket for you.")
+    )
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     first = run_agent("My chair arrived damaged", session_id="s2", graph=graph)
@@ -116,17 +134,10 @@ def test_write_action_not_executed_on_reject():
     """If a human rejects the action, the ticket must NOT be created."""
     from app.agent import build_graph as bg
 
-    script = [
-        AIMessage(content="", tool_calls=[
-            {
-                "name": "create_support_ticket",
-                "args": {"customer_email": "carol@example.com", "order_id": "ORD-1004", "subject": "Wrong item"},
-                "id": "call_1",
-            }
-        ]),
-        AIMessage(content="Understood, no ticket was created."),
-    ]
-    fake_llm = FakeToolCallingLLM(script)
+    _seed_order("ORD-1004", amount=249.0, email="carol@example.com")
+    fake_llm = FakeToolCallingLLM(
+        _lookup_then_ticket_script("ORD-1004", email="carol@example.com", final="Understood, no ticket was created.")
+    )
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     run_agent("I want a ticket for the wrong item", session_id="s3", graph=graph)
@@ -139,6 +150,54 @@ def test_write_action_not_executed_on_reject():
     tickets = db.query(Ticket).filter(Ticket.customer_email == "carol@example.com").all()
     db.close()
     assert len(tickets) == 0
+
+
+def test_ticket_blocked_without_prior_lookup():
+    """Sequencing invariant: even for a real order, a ticket is refused if the
+    agent never looked the order up first -- enforced in code, not by the model."""
+    from app.agent import build_graph as bg
+
+    _seed_order("ORD-1002", amount=249.0)
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "create_support_ticket",
+             "args": {"customer_email": "dave@example.com", "order_id": "ORD-1002", "subject": "Missing key"},
+             "id": "c_ticket"}
+        ]),
+        AIMessage(content="Okay."),
+    ]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("open a ticket for ORD-1002", session_id="s11", graph=graph)
+    resume_agent("s11", approved=True, graph=graph)
+
+    from app.db import SessionLocal, Ticket, AuditLog
+    db = SessionLocal()
+    tickets = db.query(Ticket).count()
+    blocks = db.query(AuditLog).filter(AuditLog.event_type == "guardrail_block").count()
+    db.close()
+    assert tickets == 0
+    assert blocks >= 1
+
+
+def test_ticket_blocked_for_nonexistent_order():
+    """The ORD-9999 problem: a failed lookup never verifies the order, so a
+    ticket for a non-existent order is blocked even after approval."""
+    from app.agent import build_graph as bg
+
+    # No seed -- the lookup will fail.
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-9999"))
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("refund for ORD-9999", session_id="s12", graph=graph)
+    resume_agent("s12", approved=True, graph=graph)
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    tickets = db.query(Ticket).count()
+    db.close()
+    assert tickets == 0
 
 
 class FakeGuardLLM:
@@ -195,36 +254,24 @@ def test_broken_guard_model_fails_open():
     assert "order" in result["reply"].lower()
 
 
-def _write_action_script():
-    return [
-        AIMessage(content="", tool_calls=[
-            {
-                "name": "create_support_ticket",
-                "args": {"customer_email": "dave@example.com", "order_id": "ORD-1002", "subject": "Missing key"},
-                "id": "call_1",
-            }
-        ]),
-        AIMessage(content="I've created the ticket."),
-    ]
-
-
 def test_unclear_message_during_pause_reminds_without_touching_graph():
     """Typing something other than approve/reject while paused must NOT
     re-invoke the graph (which would re-propose the action) -- it should
     return a reminder and keep the same pending approval."""
     from app.agent import build_graph as bg
 
-    fake_llm = FakeToolCallingLLM(_write_action_script())
+    _seed_order("ORD-1002", amount=249.0)
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1002"))
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     first = run_agent("my keyboard is missing a key, open a ticket", session_id="s8", graph=graph)
     assert first["pending_approval"] is not None
-    assert fake_llm.call_count == 1
+    assert fake_llm.call_count == 2  # lookup + ticket proposal
 
     second = run_agent("create support ticket", session_id="s8", graph=graph)
     assert second["pending_approval"] is not None
     assert "waiting for your decision" in second["reply"]
-    assert fake_llm.call_count == 1  # graph was never re-invoked
+    assert fake_llm.call_count == 2  # graph was never re-invoked
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
@@ -236,7 +283,8 @@ def test_unclear_message_during_pause_reminds_without_touching_graph():
 def test_typed_approve_during_pause_resumes_and_executes():
     from app.agent import build_graph as bg
 
-    fake_llm = FakeToolCallingLLM(_write_action_script())
+    _seed_order("ORD-1002", amount=249.0)
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1002"))
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     run_agent("open a ticket for my broken keyboard", session_id="s9", graph=graph)
@@ -255,9 +303,10 @@ def test_typed_approve_during_pause_resumes_and_executes():
 def test_typed_reject_during_pause_resumes_without_executing():
     from app.agent import build_graph as bg
 
-    script = _write_action_script()
-    script[1] = AIMessage(content="Understood, I won't create the ticket.")
-    fake_llm = FakeToolCallingLLM(script)
+    _seed_order("ORD-1002", amount=249.0)
+    fake_llm = FakeToolCallingLLM(
+        _lookup_then_ticket_script("ORD-1002", final="Understood, I won't create the ticket.")
+    )
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     run_agent("open a ticket for my broken keyboard", session_id="s10", graph=graph)

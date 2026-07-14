@@ -135,6 +135,37 @@ def _has_write_tool_call(ai_message: AIMessage) -> bool:
     return any(is_write_action(c["name"]) for c in calls)
 
 
+# Read tools that resolve an order_id against the database. A *successful* call
+# to one of these proves the order exists AND that the agent looked it up --
+# which is the precondition we enforce before allowing any write for that order.
+READ_TOOLS_WITH_ORDER = {"lookup_order", "check_refund_status"}
+
+
+def _verified_order_ids(messages) -> set:
+    """Order IDs this conversation has already confirmed via a successful read.
+
+    Deterministic: walks the message history, matches each read-tool call to
+    its result by tool_call_id, and treats an order as verified only if the
+    result did not report "No order found". This is what makes the
+    look-before-write rule a code invariant instead of a model habit.
+    """
+    call_order_id = {}
+    for m in messages:
+        for call in (getattr(m, "tool_calls", None) or []):
+            if call["name"] in READ_TOOLS_WITH_ORDER:
+                oid = (call.get("args") or {}).get("order_id")
+                if oid:
+                    call_order_id[call["id"]] = oid
+
+    verified = set()
+    for m in messages:
+        if isinstance(m, ToolMessage):
+            oid = call_order_id.get(m.tool_call_id)
+            if oid and "No order found" not in str(m.content):
+                verified.add(oid)
+    return verified
+
+
 def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
     """
     llm_client: inject a fake/test LLM to test the graph without a real API
@@ -203,17 +234,39 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
 
     def execute_tools(state: AgentState) -> AgentState:
         db = SessionLocal()
+        sid = state["session_id"]
         last_ai: AIMessage = state["messages"][-1]
         tool_messages = []
         decision = state.get("pending_decision", "")
+        verified = _verified_order_ids(state["messages"])
+
+        # Reads before writes so that a lookup issued in the SAME batch can
+        # satisfy the look-before-write rule for a write in that batch.
+        calls = sorted(last_ai.tool_calls, key=lambda c: is_write_action(c["name"]))
         try:
-            for call in last_ai.tool_calls:
+            for call in calls:
                 name, args, call_id = call["name"], call["args"], call["id"]
 
                 if is_write_action(name):
                     allowed, reason = validate_write_action(name, args)
                     if not allowed:
-                        log_event(db, state["session_id"], "guardrail_block", reason)
+                        log_event(db, sid, "guardrail_block", reason)
+                        tool_messages.append(
+                            ToolMessage(content=f"Action blocked by guardrail: {reason}", tool_call_id=call_id)
+                        )
+                        continue
+
+                    # Sequencing invariant: never write for an order the agent
+                    # hasn't successfully looked up in this conversation. This
+                    # also blocks tickets for non-existent orders, since a
+                    # failed lookup never enters the verified set.
+                    order_id = args.get("order_id")
+                    if order_id and order_id not in verified:
+                        reason = (
+                            f"Blocked: {name} for order {order_id} without a prior successful "
+                            f"lookup of that order in this conversation."
+                        )
+                        log_event(db, sid, "guardrail_block", reason)
                         tool_messages.append(
                             ToolMessage(content=f"Action blocked by guardrail: {reason}", tool_call_id=call_id)
                         )
@@ -222,7 +275,7 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                     if decision != "approve":
                         decision_label = decision or "none"
                         log_event(
-                            db, state["session_id"], "write_action_rejected",
+                            db, sid, "write_action_rejected",
                             f"{name}({args}) not executed. decision=" + repr(decision_label),
                         )
                         tool_messages.append(
@@ -233,9 +286,16 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                         )
                         continue
 
-                result = tools_by_name[name].invoke(args)
-                log_event(db, state["session_id"], "tool_call", f"{name}({args}) -> {result}")
-                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+                    result = tools_by_name[name].invoke(args)
+                    log_event(db, sid, "tool_call", f"{name}({args}) -> {result}")
+                    tool_messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+                else:
+                    result = tools_by_name[name].invoke(args)
+                    log_event(db, sid, "tool_call", f"{name}({args}) -> {result}")
+                    order_id = args.get("order_id")
+                    if order_id and "No order found" not in str(result):
+                        verified.add(order_id)
+                    tool_messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
         finally:
             db.close()
         return {"messages": tool_messages, "pending_decision": ""}
