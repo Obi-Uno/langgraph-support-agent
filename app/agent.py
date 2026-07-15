@@ -1,17 +1,25 @@
 """
 LangGraph orchestration for the support agent.
 
+This is a ReAct agent (reason -> act -> observe, looping) built on LangGraph's
+native tool-calling loop: call_model -> execute_tools -> call_model. The running
+`messages` list is the agent's scratchpad, persisted by the checkpointer.
+
 Flow per turn:
-  1. Retrieve relevant policy context (RAG)
-  2. Check sentiment/risk escalation triggers BEFORE calling the LLM
-  3. Let the LLM decide + call tools (LangGraph's built-in tool loop)
-  4. Read-only tool calls execute immediately. WRITE tool calls (e.g. creating
-     a ticket) pause the graph and wait for human approval before executing --
-     this directly mirrors the "AI must never create/update/delete records
-     without sign-off" governance pattern that shows up repeatedly in
-     enterprise-flavored client postings.
-  5. Grounding check on the final response
-  6. Log every step to the audit trail
+  1. Risk/escalation check + LLM relevance gate BEFORE the main model runs
+     (off-topic messages get a canned reply and never reach the expensive model)
+  2. Retrieve relevant policy context (RAG) and let the model reason + act. When
+     it calls a tool it also emits a one-line "thought", logged as a reasoning
+     event for traceability (never shown to the customer).
+  3. Deterministic gates in execute_tools, enforced in code not left to the model:
+     argument-shape validation, look-before-write (a ticket requires a prior
+     successful lookup / existence check), and a hard refund-amount threshold.
+  4. Read-only tool calls execute immediately. WRITE tool calls pause the graph
+     and wait for human approval before executing -- the "AI must never
+     create/update/delete records without sign-off" governance pattern.
+  5. Grounding check on the final response.
+  6. Every step -- reasoning, tool call, guardrail block, escalation, approval,
+     response -- is logged to the audit trail.
 
 Conversation memory: the graph is compiled with a checkpointer keyed on
 session_id (LangGraph's "thread_id"), so multi-turn context (e.g. "and what
@@ -106,6 +114,9 @@ Rules you MUST follow:
 - Only state policy facts that appear in the provided policy context below.
 - Before creating a support ticket about an order, you MUST first call lookup_order for that order in this conversation to confirm it exists. Never call create_support_ticket for an order you have not looked up.
 - If a refund or damaged-item issue needs human review, call create_support_ticket instead of promising a resolution yourself.
+- When you decide to use a tool, first briefly state your reasoning in ONE short
+  sentence (your "thought"), then make the tool call. This reasoning is logged
+  internally for traceability -- keep it professional.
 - Be concise and friendly.
 
 Relevant policy context for this conversation:
@@ -218,10 +229,26 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         return {"messages": [AIMessage(content=OFF_TOPIC_REPLY)], "off_topic": False}
 
     def call_model(state: AgentState) -> AgentState:
+        """Core ReAct step. The model reads the whole scratchpad (system prompt +
+        retrieved policy + running message history), reasons, and decides the next
+        move: call a tool, ask the user, or answer. When it chooses to act it also
+        verbalizes a one-line "thought", which we log to the audit trail for
+        traceability. That thought lives on the intermediate tool-calling message,
+        so it is never surfaced to the customer -- only the final answer is."""
         last_user_msg = _get_last_human_message(state)
         policy_context = retrieve_as_context(last_user_msg)
         system = SystemMessage(content=SYSTEM_PROMPT.format(policy_context=policy_context))
         response = llm_with_tools.invoke([system, *state["messages"]])
+        # ReAct trace: when the model calls a tool, its content is the reasoning
+        # behind that action (not a user reply) -- log it as a "reasoning" event.
+        # On a final answer there are no tool calls and content IS the reply, so
+        # we don't double-log it here (ground_check logs the response instead).
+        if getattr(response, "tool_calls", None) and str(response.content).strip():
+            db = SessionLocal()
+            try:
+                log_event(db, state["session_id"], "reasoning", str(response.content).strip())
+            finally:
+                db.close()
         return {"messages": [response]}
 
     def await_approval(state: AgentState) -> AgentState:

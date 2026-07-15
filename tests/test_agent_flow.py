@@ -105,6 +105,40 @@ def test_read_only_tool_call_executes_without_approval():
     assert "on the way" in result["reply"]
 
 
+def test_reasoning_trace_logged_when_model_acts_but_not_shown_to_user():
+    """ReAct 'thought': when the model calls a tool it explains why in its
+    content -- that reasoning is logged as an audit event, but the intermediate
+    reasoning must NOT become the user-facing reply."""
+    from app.agent import build_graph as bg
+
+    script = [
+        AIMessage(
+            content="The customer wants order status, so I'll look up ORD-1001.",
+            tool_calls=[{"name": "lookup_order", "args": {"order_id": "ORD-1001"}, "id": "call_1"}],
+        ),
+        AIMessage(content="Your order is on the way!"),
+    ]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    result = run_agent("Where is my order?", session_id="s_reason", graph=graph)
+
+    # the reasoning is internal, not the reply
+    assert result["reply"] == "Your order is on the way!"
+    assert "I'll look up" not in result["reply"]
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    reasoning_events = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s_reason", AuditLog.event_type == "reasoning")
+        .all()
+    )
+    db.close()
+    assert len(reasoning_events) == 1
+    assert "look up ORD-1001" in reasoning_events[0].detail
+
+
 def test_write_action_pauses_for_approval_then_executes_on_approve():
     """create_support_ticket is a WRITE action -- must pause for a human decision."""
     from app.agent import build_graph as bg

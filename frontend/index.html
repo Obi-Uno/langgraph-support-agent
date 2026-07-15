@@ -17,6 +17,7 @@
     --red: #dc2626;
     --amber: #d97706;
     --purple: #7c3aed;
+    --indigo: #6366f1;
   }
   * { box-sizing: border-box; }
   body {
@@ -119,6 +120,8 @@
   .event-time { font-size: 10.5px; color: #9ca3af; margin-left: 6px; }
 
   .ev-response       { --c: var(--green);  }
+  .ev-reasoning      { --c: var(--indigo); }
+  .ev-reasoning .event-detail { font-style: italic; }
   .ev-tool_call      { --c: var(--accent); }
   .ev-escalation     { --c: var(--amber);  }
   .ev-guardrail_block{ --c: var(--red);    }
@@ -342,6 +345,7 @@ function respondToApproval(approved, card) {
 /* ---------- audit trail ---------- */
 const EVENT_LABELS = {
   response: 'response',
+  reasoning: 'reasoning',
   tool_call: 'tool call',
   escalation: 'escalation',
   guardrail_block: 'guardrail block',
