@@ -122,7 +122,23 @@ def get_audit_log(session_id: str):
         db.close()
 
 
+class RevalidatingStaticFiles(StaticFiles):
+    """Serve the UI with revalidation required.
+
+    StaticFiles sends ETag/Last-Modified but no Cache-Control, so browsers fall
+    back to heuristic caching and can keep serving a stale index.html for hours
+    after a deploy -- which looks exactly like a broken UI. "no-cache" doesn't
+    disable caching; it forces a revalidation request, which the ETag answers
+    with a 304 when nothing changed. Costs a round trip, not bandwidth.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
 # Serve the chat UI at /
 frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 if os.path.isdir(frontend_dir):
-    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+    app.mount("/", RevalidatingStaticFiles(directory=frontend_dir, html=True), name="frontend")
