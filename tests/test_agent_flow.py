@@ -396,12 +396,64 @@ def test_high_value_ticket_escalates_after_approval():
     result = resume_agent("s15", approved=True, graph=graph)
 
     assert result["escalated"] is True
+    # the customer must actually be TOLD they're being escalated -- the flag
+    # alone is invisible to them. This escalation is only raised during the
+    # resumed run, so resume_agent has to apply the override too.
+    assert "specialist" in result["reply"].lower()
+    assert "899" in result["reply"]  # the threshold reason reaches the customer
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
     n = db.query(Ticket).filter(Ticket.customer_email == "bob@example.com").count()
     db.close()
     assert n == 1  # ticket still created per policy
+
+
+def test_incidental_affirmative_does_not_approve_a_pending_write():
+    """A new question that happens to contain "ok"/"yes" must NOT execute the
+    pending write -- it's a message, not a verdict."""
+    from app.agent import build_graph as bg
+
+    _seed_order("ORD-1002", amount=249.0, email="dave@example.com")
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1002"))
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    first = run_agent("my keyboard is missing a key, open a ticket", session_id="s16", graph=graph)
+    assert first["pending_approval"] is not None
+    calls_at_pause = fake_llm.call_count
+
+    second = run_agent("ok but what about ORD-1002?", session_id="s16", graph=graph)
+
+    assert second["pending_approval"] is not None       # still waiting
+    assert "waiting for your decision" in second["reply"]
+    assert fake_llm.call_count == calls_at_pause        # graph untouched
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    n = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    db.close()
+    assert n == 0  # nothing was written
+
+
+def test_decision_classifier_boundaries():
+    """Pure verdicts resolve; anything carrying extra meaning asks again."""
+    from app.agent import _classify_decision as c
+
+    assert c("approve") == "approve"
+    assert c("yes") == "approve"
+    assert c("yes, approve it") == "approve"
+    assert c("go ahead") == "approve"
+    assert c("please approve that") == "approve"
+    assert c("reject") == "reject"
+    assert c("no, cancel that") == "reject"
+
+    # not verdicts -- must return None so the user is asked again
+    assert c("ok but what about ORD-1002?") is None
+    assert c("yes and also where is my other order") is None
+    assert c("no wait, yes approve it") is None   # both classes
+    assert c("ok?") is None                       # a question
+    assert c("create support ticket") is None
+    assert c("") is None
 
 
 def test_conversation_memory_persists_across_turns():

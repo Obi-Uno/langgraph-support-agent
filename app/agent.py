@@ -28,8 +28,7 @@ within a single call.
 
 Note: this same graph shape (retrieve -> risk-check -> tool-loop -> approval
 gate -> ground-check -> log) is exactly what maps onto Google ADK's agent/tool
-pattern too -- the underlying architecture is framework-agnostic, LangGraph
-is just the most commonly requested keyword in client postings.
+pattern too -- the underlying architecture is framework-agnostic.
 """
 import os
 import re
@@ -439,8 +438,19 @@ def _extract_pending_approval(graph, config):
     return None
 
 
-_APPROVE_RE = re.compile(r"\b(approve|approved|yes|yep|yeah|confirm|go ahead|do it|okay|ok|sure)\b")
-_REJECT_RE = re.compile(r"\b(reject|rejected|no|nope|cancel|deny|dont|don'?t|stop)\b")
+# Vocabulary for reading a typed approve/reject on a paused session. Multi-word
+# verdicts are folded into single tokens first so the closed-vocabulary check
+# below can treat the message as a bag of known words.
+_DECISION_PHRASES = [
+    ("go ahead", "approve"),
+    ("do it", "approve"),
+    ("do not", "dont"),
+    ("thank you", "thanks"),
+]
+_APPROVE_WORDS = {"approve", "approved", "yes", "yep", "yeah", "confirm", "confirmed", "okay", "ok", "sure", "proceed", "accept"}
+_REJECT_WORDS = {"reject", "rejected", "no", "nope", "cancel", "deny", "denied", "dont", "don't", "stop", "abort"}
+# harmless words allowed to accompany a verdict without making it ambiguous
+_FILLER_WORDS = {"please", "thanks", "it", "that", "this", "now", "then", "just", "and", "the", "action", "ticket", "lets", "let's", "wait"}
 
 PENDING_REMINDER = (
     "There's an action above waiting for your decision -- click Approve or "
@@ -450,17 +460,36 @@ PENDING_REMINDER = (
 
 
 def _classify_decision(message: str):
-    """Map a free-text reply on a paused session to approve/reject/unclear.
-    Deliberately conservative: if both kinds of words appear ('no wait, yes
-    approve it'), treat as unclear and ask again rather than guess."""
-    lowered = message.lower()
-    approves = bool(_APPROVE_RE.search(lowered))
-    rejects = bool(_REJECT_RE.search(lowered))
+    """Map a free-text reply on a paused session to "approve" / "reject" / None.
+
+    This decides whether a typed message executes a pending WRITE, so it is
+    deliberately strict: the message must be a decision and NOTHING else. Any
+    word outside the decision/filler vocabulary -- or a question mark -- means
+    this is a message, not a verdict, and we return None (the caller then just
+    reminds the user to decide).
+
+    Substring matching is not enough here: "ok but what about ORD-1002?"
+    contains "ok" but is a new question, and must never approve a write. The
+    only safe failure direction is toward asking again.
+    """
+    text = message.lower().strip()
+    if "?" in text:  # a question is never a verdict
+        return None
+    for phrase, replacement in _DECISION_PHRASES:
+        text = text.replace(phrase, replacement)
+    words = re.findall(r"[a-z']+", text)
+    if not words:
+        return None
+    # any unrecognized word means this isn't a pure decision
+    if any(w not in _APPROVE_WORDS and w not in _REJECT_WORDS and w not in _FILLER_WORDS for w in words):
+        return None
+    approves = any(w in _APPROVE_WORDS for w in words)
+    rejects = any(w in _REJECT_WORDS for w in words)
     if approves and not rejects:
         return "approve"
     if rejects and not approves:
         return "reject"
-    return None
+    return None  # both or neither ("no wait, yes") -> ask again
 
 
 def _log_interrupt(session_id, pending):
@@ -478,6 +507,19 @@ def _log_interrupt(session_id, pending):
 def _final_reply_from_state(values):
     final_message = values["messages"][-1]
     return final_message.content if isinstance(final_message, AIMessage) else str(final_message.content)
+
+
+def _reply_for_result(result):
+    """Customer-facing reply for a completed run, applying the escalation
+    override. Shared by run_agent AND resume_agent: the refund-threshold
+    escalation only fires after approval (inside a resumed run), so if resume
+    skipped this the customer would get a plain reply while the API reported
+    escalated=true."""
+    reply = _final_reply_from_state(result)
+    if result.get("escalated"):
+        reason = result.get("escalation_reason", "")
+        reply = f"I'm connecting you with a specialist for this. {reason} Someone will follow up shortly."
+    return reply
 
 
 def run_agent(user_message, session_id=None, graph=None):
@@ -528,14 +570,9 @@ def run_agent(user_message, session_id=None, graph=None):
             "pending_approval": pending,
         }
 
-    reply = _final_reply_from_state(result)
-    if result.get("escalated"):
-        reason = result["escalation_reason"]
-        reply = f"I'm connecting you with a specialist for this. {reason} Someone will follow up shortly."
-
     return {
         "session_id": session_id,
-        "reply": reply,
+        "reply": _reply_for_result(result),
         "escalated": result.get("escalated", False),
         "pending_approval": None,
     }
@@ -567,10 +604,9 @@ def resume_agent(session_id, approved, graph=None):
             "pending_approval": pending,
         }
 
-    reply = _final_reply_from_state(result)
     return {
         "session_id": session_id,
-        "reply": reply,
+        "reply": _reply_for_result(result),
         "escalated": result.get("escalated", False),
         "pending_approval": None,
     }
