@@ -1,10 +1,14 @@
-# Support Agent Demo
+# LangGraph Support Agent
 
-A customer-support AI agent that **takes real actions**, not just answers questions --
-built to demonstrate the specific pattern that comes up repeatedly in production
-agentic-AI work: tool-calling with guardrails, retrieval-grounded answers,
-human-in-the-loop approval on write actions, multi-turn memory, and human
-escalation when a case is out of scope.
+A customer-support AI agent that **takes real actions**, not just answers questions:
+tool-calling with guardrails, retrieval-grounded answers, human-in-the-loop
+approval on write actions, multi-turn memory, and escalation to a human when a
+case is out of scope.
+
+The design rule throughout: **the model decides what the customer means; the code
+decides what is allowed to happen.** Reads run freely, writes require human
+sign-off, and every consequential step is enforced deterministically rather than
+left to the model's judgement.
 
 **Live demo:** https://support-agent-demo.onrender.com — free tier, first
 request after idle takes ~30-60s to wake, then it's fast.
@@ -17,9 +21,8 @@ request after idle takes ~30-60s to wake, then it's fast.
 - Answers policy questions (shipping, returns, account) grounded in a small
   retrieval-augmented knowledge base, so it can't invent policy that doesn't exist.
 - **Pauses for human approval before any write action** (e.g. creating a ticket)
-  and only executes once a reviewer approves -- directly implements the
-  "AI must never create/update/delete records without sign-off" governance
-  pattern that shows up repeatedly in enterprise client requirements. Nothing
+  and only executes once a reviewer approves -- the "AI must never
+  create/update/delete records without sign-off" governance pattern. Nothing
   is written to the database until a human says yes.
 - **Remembers the conversation across turns** via a LangGraph checkpointer keyed
   on session ID, so follow-up questions ("what about that order I just asked
@@ -34,7 +37,7 @@ request after idle takes ~30-60s to wake, then it's fast.
 - Runs a grounding check on its own final response before returning it, flagging
   any claim not backed by real tool output.
 - Logs every decision -- tool call, guardrail block, approval, escalation,
-  response -- to an audit trail, queryable per conversation. The demo frontend
+  response -- to an audit trail, queryable per conversation. The bundled web UI
   renders it live in a "behind the scenes" panel next to the chat, so you can
   watch the pipeline work in real time.
 - Exposes an `n8n`-compatible webhook, so the same agent can sit behind a
@@ -60,9 +63,10 @@ flowchart TD
     ESC[Escalation flag] -.->|overrides the final reply with a specialist hand-off| OUT
 
     subgraph Memory
-      CP[(LangGraph checkpointer, keyed by session_id)]
+      CP[(SQLite checkpointer, keyed by session_id)]
     end
-    M -.reads/writes.-> CP
+    CP -.->|conversation history so far| M
+    WAIT -.->|paused state persisted, survives restarts| CP
 
     subgraph Audit
       direction LR
@@ -73,7 +77,11 @@ flowchart TD
     T -.log.-> AL
     WAIT -.log.-> AL
     GC -.log.-> AL
+    OT -.log.-> AL
 ```
+
+Every node's state is checkpointed, which is why a conversation resumes across
+separate HTTP requests and why a paused approval survives a restart.
 
 Note that escalation does **not** short-circuit the graph: an escalating message
 still runs the model and its tools (so the specialist inherits a full audit trail
@@ -87,22 +95,26 @@ compiled with `interrupt_before=["await_approval"]` so execution genuinely
 pauses (and persists via the checkpointer) before any write action runs --
 this isn't a UI-only illusion, the graph really stops mid-execution and
 resumes exactly where it left off once `/approve/{session_id}` is called.
-The same shape maps directly onto Google ADK's agent/tool pattern -- LangGraph
-was chosen here because it's the most commonly requested framework in client
-job postings, not because the architecture is framework-specific.
+
+The graph is hand-built rather than using LangGraph's prebuilt
+`create_react_agent`, because the governance lives in seams the prebuilt doesn't
+expose: a gate *before* the model runs, deterministic checks *between* a proposed
+action and its execution, and a grounding check *after* the final answer. Most
+decisively, the prebuilt's `interrupt_before=["tools"]` is all-or-nothing --
+"reads run free, writes need sign-off" can't be expressed with it.
 
 ## Stack
 
 | Layer          | Choice                          | Why |
 |----------------|----------------------------------|-----|
 | API            | FastAPI                         | async, auto-docs at `/docs` |
-| Agent          | LangGraph, provider-switchable LLM (`LLM_PROVIDER`: Groq llama-3.3-70b default, or Gemini / Claude) | tool-calling loop with explicit guardrail + approval nodes; free-tier friendly for demos, swap one env var for production Claude |
+| Agent          | LangGraph, provider-switchable LLM (`LLM_PROVIDER`: Groq llama-3.3-70b default, or Gemini / Claude) | ReAct tool-calling loop with explicit guardrail + approval nodes; the provider is one env var, so the architecture isn't married to a vendor |
 | Relevance gate | Separate small model (Groq llama-3.1-8b-instant) | topic classification is too fuzzy for keywords; a cheap second model gates traffic without touching the main model's rate limits |
 | Memory         | LangGraph `SqliteSaver` checkpointer | multi-turn conversation state AND paused approvals survive server restarts, keyed by session_id |
 | Storage        | SQLite (swap `DATABASE_URL` for Postgres/Neon) | zero external dependency, no region-block risk |
 | Retrieval      | scikit-learn TF-IDF              | no embedding-model download at runtime, deploys fast |
 | Frontend       | Plain HTML/JS, chat + live audit panel | single file, Approve/Reject cards for the HITL flow, real-time audit trail visualization |
-| Automation hook| `/webhook/n8n` endpoint           | bridges custom-agent and no-code-automation client requests |
+| Automation hook| `/webhook/n8n` endpoint           | the same agent is callable from a no-code workflow, not just a custom frontend |
 
 ## Running locally
 
@@ -129,10 +141,10 @@ curl -X POST http://localhost:8000/chat \
 # Write action -- pauses for approval. Response includes pending_approval + session_id.
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "My chair from ORD-1003 arrived damaged, open a ticket", "session_id": "demo-1"}'
+  -d '{"message": "My chair from ORD-1003 arrived damaged, open a ticket", "session_id": "session-1"}'
 
 # Resume: approve or reject the pending action
-curl -X POST http://localhost:8000/approve/demo-1 \
+curl -X POST http://localhost:8000/approve/session-1 \
   -H "Content-Type: application/json" \
   -d '{"approved": true}'
 ```
@@ -194,11 +206,13 @@ Same agent, same guardrails, same approval gate, reachable from a no-code workfl
   CRM/order-management system -- the tool functions are the integration point;
   swapping them to call a real API is a matter of changing the function body,
   not the agent architecture.
-- The grounding check (`app/guardrails.py::check_grounding`) is a demo-grade
-  heuristic (flags unsupported dollar amounts), not a production hallucination
-  detector -- the point being demonstrated is that a grounding check exists in
-  the pipeline at all, which is what several client postings explicitly asked for.
-- The human-in-the-loop approval gate currently requires a manual `/approve`
-  call (or the button in the demo UI) -- in a real deployment this would notify
-  an actual reviewer (Slack message, email, admin dashboard) rather than
-  relying on someone watching the API.
+- The grounding check (`app/guardrails.py::check_grounding`) is a deliberately
+  simple heuristic (flags dollar amounts unsupported by tool output), not a
+  production hallucination detector -- it demonstrates where such a check
+  belongs in the pipeline.
+- The human-in-the-loop approval gate requires a manual `/approve` call (or the
+  button in the web UI). A production deployment would notify a real reviewer
+  (Slack, email, an admin dashboard) rather than relying on someone watching
+  the API.
+- The public endpoints have no authentication or rate limiting beyond the
+  webhook's shared secret; both would be prerequisites for real traffic.

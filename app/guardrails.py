@@ -1,12 +1,14 @@
 """
 Guardrail checks applied around tool calls and final responses.
 
-Most checks are intentionally simple, readable rules; the relevance gate is
-the one exception -- it uses a small/cheap LLM because topic classification
-is genuinely hard to do with keywords. In a real client engagement you'd tune
-thresholds per business, but the pattern (validate before write, escalate on
-risk signals, gate off-topic traffic, never invent data) is the part clients
-actually care about seeing demonstrated.
+Most checks are deliberately simple, readable rules -- they are the deterministic
+half of the system, and their value comes from being provable rather than clever.
+The relevance gate is the one exception: it uses a small/cheap LLM because topic
+classification is genuinely hard to do with keywords.
+
+Thresholds and ID formats here are the knobs you tune per deployment; the shape
+(validate before write, escalate on risk signals, gate off-topic traffic, never
+invent data) is what stays constant.
 """
 import os
 import re
@@ -45,8 +47,8 @@ def should_escalate(user_message: str, order_amount: float | None = None) -> tup
     return False, ""
 
 
-# Order IDs the demo store issues look like ORD-1001. In a real engagement this
-# regex is configured to the client's ID scheme. The point is that a
+# Order IDs in this store look like ORD-1001; configure the pattern to match the
+# ID scheme of whatever system the tools point at. The point is that a
 # model-generated argument is checked for SHAPE, deterministically, before any
 # tool touches the database -- malformed junk ("unknown", "", an injection
 # string) dies at the boundary instead of hitting the DB or a human reviewer.
@@ -129,11 +131,12 @@ def check_relevance(guard_llm, user_message: str, history_text: str = "") -> tup
 
 def check_grounding(response_text: str, retrieved_context: str) -> tuple[bool, str]:
     """
-    Cheap grounding check: if the response asserts a dollar amount or order ID
-    that never appeared anywhere in the tool output / retrieved context, flag it.
-    This is a demo-grade heuristic, not a production hallucination detector --
-    the point being demonstrated is *that the check exists at all*, which is
-    exactly what several client postings explicitly asked for.
+    Cheap grounding check: if the response asserts a dollar amount that never
+    appeared in the tool output / retrieved context, flag it.
+
+    Deliberately simple, and not a production hallucination detector -- it marks
+    where such a check belongs in the pipeline (after the model, before the
+    reply is trusted) so a stronger implementation can drop straight in.
     """
     money_in_response = set(re.findall(r"\$\d+(?:\.\d{2})?", response_text))
     money_in_context = set(re.findall(r"\$\d+(?:\.\d{2})?", retrieved_context))

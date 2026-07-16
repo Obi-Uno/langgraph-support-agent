@@ -1,10 +1,12 @@
 """
-Tests the LangGraph plumbing itself: multi-turn memory (checkpointer) and
-the human-in-the-loop approval gate on write actions.
+Tests the LangGraph plumbing itself: multi-turn memory (checkpointer), the
+human-in-the-loop approval gate, and the deterministic gates around writes.
 
-Uses a scripted fake LLM instead of a real Anthropic call -- these tests
-validate our graph wiring (routing, interrupt, resume, state persistence),
-not Claude's actual reasoning, so they run with no API key and no network.
+These use a scripted fake LLM rather than a live model, which is the point:
+the guarantees must hold for ANY model behaviour, including adversarial. Several
+tests script the model into doing the wrong thing (proposing a write for an
+order it never looked up, or for one that doesn't exist) and assert the shell
+stops it anyway. They need no API key and no network.
 """
 import os
 import tempfile
@@ -18,8 +20,8 @@ from app.agent import build_graph, run_agent, resume_agent
 
 class FakeToolCallingLLM:
     """Returns a scripted sequence of AIMessages, ignoring the actual prompt.
-    Call .bind_tools() just returns self so it slots into the same code path
-    as the real ChatAnthropic client.
+    .bind_tools() returns self so it slots into the same code path as a real
+    chat model client.
     """
 
     def __init__(self, script):

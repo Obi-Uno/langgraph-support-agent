@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Support Agent Demo</title>
+<title>Support Agent</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
   :root {
@@ -37,7 +37,7 @@
   header .titles { flex: 1; min-width: 0; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
   header p { font-size: 11.5px; margin: 2px 0 0; color: var(--text-muted); }
-  /* ---------- demo guide ---------- */
+  /* ---------- usage guide ---------- */
   .guide { border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .guide summary { cursor: pointer; padding: 9px 18px; color: var(--accent); font-weight: 600; font-size: 12px; list-style: none; display: flex; align-items: center; gap: 6px; user-select: none; }
   .guide summary::before { content: "▸"; transition: transform .15s; font-size: 10px; }
@@ -149,7 +149,7 @@
         </div>
       </header>
       <details class="guide">
-        <summary>What can I ask? — demo guide</summary>
+        <summary>What can I ask?</summary>
         <div class="guide-body">
           <h3>Capabilities</h3>
           <ul>
@@ -158,7 +158,7 @@
             <li>Answer policy questions grounded in the store's policy documents</li>
             <li>Remember the conversation — follow-ups like "what about that order?" work</li>
           </ul>
-          <h3>Demo orders you can ask about</h3>
+          <h3>Sample orders you can ask about</h3>
           <table class="orders-table">
             <tr><th>Order</th><th>Item</th><th>Status</th><th>Amount</th></tr>
             <tr><td>ORD-1001</td><td>Wireless Mouse</td><td>shipped</td><td>$79.99</td></tr>
@@ -448,11 +448,12 @@ document.getElementById('chips').addEventListener('click', function(e) {
 
 /* ---------- welcome message (visual only, not part of the session) ---------- */
 addBubble(
-  "Hi! I'm the support agent for a demo e-commerce store. I can look up orders, " +
+  "Hi! I'm the support agent for a sample e-commerce store. I can look up orders, " +
   "check refunds, open support tickets (with human sign-off) and answer " +
   "shipping/returns/account policy questions.\n\n" +
   "New here? Open “What can I ask?” above for the sample orders and " +
-  "things to try, or just click a suggestion below.",
+  "things to try, or just click a suggestion below. Orders and tickets are " +
+  "sample data — nothing here is a real purchase.",
   'agent'
 );
 

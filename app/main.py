@@ -9,19 +9,19 @@ from app.agent import run_agent, resume_agent
 from app.seed import run as seed_run
 
 app = FastAPI(
-    title="Support Agent Demo",
+    title="Support Agent",
     description=(
         "A tool-calling customer support agent with guardrails, RAG-backed "
-        "policy answers, human escalation, human-in-the-loop approval, "
-        "conversation memory, and an n8n-compatible webhook. Built as a "
-        "portfolio demo of production agentic AI patterns."
+        "policy answers, human escalation, human-in-the-loop approval on write "
+        "actions, conversation memory, an audit trail, and an n8n-compatible "
+        "webhook."
     ),
     version="1.1.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # demo project; lock this down for a real deployment
+    allow_origins=["*"],  # open for the public sandbox; restrict before real traffic
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -74,10 +74,11 @@ def chat(req: ChatRequest):
 @app.post("/webhook/n8n", response_model=ChatResponse)
 def n8n_webhook(req: ChatRequest, x_webhook_secret: str | None = Header(default=None)):
     """
-    Same agent, reachable from an n8n HTTP Request node.
-    Demonstrates the agent can sit behind a no-code automation layer, not
-    just a custom frontend -- bridges the two most common client requests
-    we saw: full custom agents AND n8n-based automation.
+    Same agent, reachable from an n8n HTTP Request node (or any other caller).
+
+    Machine-to-machine entry point: authenticated with a shared secret rather
+    than a browser session, so the agent -- guardrails, approval gate and all --
+    can sit inside a no-code automation workflow instead of behind a UI.
     """
     expected = os.getenv("N8N_WEBHOOK_SECRET")
     if expected and x_webhook_secret != expected:
@@ -121,7 +122,7 @@ def get_audit_log(session_id: str):
         db.close()
 
 
-# Serve the demo chat widget at /
+# Serve the chat UI at /
 frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 if os.path.isdir(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")

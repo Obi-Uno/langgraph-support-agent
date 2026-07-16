@@ -26,9 +26,9 @@ session_id (LangGraph's "thread_id"), so multi-turn context (e.g. "and what
 about THAT order") is preserved across separate HTTP requests, not just
 within a single call.
 
-Note: this same graph shape (retrieve -> risk-check -> tool-loop -> approval
-gate -> ground-check -> log) is exactly what maps onto Google ADK's agent/tool
-pattern too -- the underlying architecture is framework-agnostic.
+The graph shape (risk-check -> retrieve -> tool-loop -> approval gate ->
+ground-check -> log) is framework-agnostic; LangGraph supplies the state
+machine, the checkpointer and the interrupt, not the architecture.
 """
 import os
 import re
@@ -48,9 +48,10 @@ from app.guardrails import (
 )
 from app.db import SessionLocal, log_event, Order
 
-# LLM_PROVIDER lets you swap the model backend without touching any agent
-# logic -- "gemini" or "groq" (both free-tier, good for local testing/demos)
-# or "anthropic" (what production would likely run, once you have paid credits).
+# LLM_PROVIDER swaps the model backend without touching any agent logic:
+# "groq", "gemini" or "anthropic". Keeping the provider behind one env var is
+# also what makes data-residency choices (EU-region endpoints, self-hosted
+# models) a config decision rather than a rewrite.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
 
 _DEFAULT_MODELS = {
@@ -182,8 +183,9 @@ def _verified_order_ids(messages) -> set:
 
 def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
     """
-    llm_client: inject a fake/test LLM to test the graph without a real API
-    call (see tests/test_agent_flow.py). Defaults to the real Claude client.
+    llm_client: inject a fake/test LLM to exercise the graph without a real API
+    call (see tests/test_agent_flow.py). Defaults to the provider selected by
+    LLM_PROVIDER.
     checkpointer: defaults to a SQLite-backed checkpointer so conversation
     memory AND paused approvals survive server restarts. Tests inject
     MemorySaver to stay isolated and file-free.

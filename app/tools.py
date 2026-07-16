@@ -1,9 +1,12 @@
 """
 Tool implementations the agent can call.
 
-Each tool is a plain Python function with a docstring the LLM sees as the
-tool description. Kept deliberately simple (mock 'internal systems') so the
-project is easy for a client to read end-to-end in a few minutes.
+Each tool is a plain Python function whose docstring the LLM sees as the tool
+description -- that docstring is how the model knows when to call it.
+
+These stand in for a real CRM / order-management system and are the integration
+seam: pointing them at a live API (Shopify, Zendesk, ...) means rewriting the
+function bodies, not the agent architecture.
 """
 from langchain_core.tools import tool
 

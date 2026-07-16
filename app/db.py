@@ -1,7 +1,7 @@
 """
-Database layer for the Support Agent demo.
+Database layer for the support agent.
 
-Uses SQLite by default (zero external dependency, no Supabase/hosted DB risk).
+Uses SQLite by default (zero external dependency, no hosted-DB risk).
 Swap DATABASE_URL in .env for Postgres/Neon if you want a hosted DB later.
 """
 from datetime import datetime, timezone
@@ -45,8 +45,9 @@ class Ticket(Base):
 
 class AuditLog(Base):
     """
-    Immutable-style audit trail of every agent decision.
-    Mirrors the audit-logging requirement seen repeatedly in client postings.
+    Append-only audit trail of every agent decision: reasoning, tool calls,
+    guardrail blocks, escalations, approvals and responses. This is what makes
+    the agent's behaviour reviewable after the fact rather than a black box.
     """
     __tablename__ = "audit_log"
 

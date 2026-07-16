@@ -7,12 +7,13 @@ of a vector DB (Chroma/Pinecone/pgvector). Two reasons:
      from Hugging Face on first request, no hosted vector DB that could be
      region-blocked or rate-limited (see: Supabase's India block in Feb 2026).
   2. For a knowledge base this small (a handful of FAQ docs), TF-IDF retrieval
-     is plenty accurate and keeps the whole demo deployable on a free-tier
-     instance with a fast cold start.
+     is plenty accurate and keeps the app deployable on a free-tier instance
+     with a fast cold start.
 
-Swapping this for pgvector/Chroma/Pinecone in a real client engagement is a
-ten-line change (retrieve() is the only function callers depend on) -- the
-agent graph and everything else stays identical.
+Swapping this for pgvector/Chroma/Pinecone is a ten-line change (retrieve() is
+the only function callers depend on) -- the agent graph and everything else
+stays identical. At that scale you would also want multi-query retrieval, since
+TF-IDF averages a multi-topic question into a single ranking.
 """
 import os
 import glob
