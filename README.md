@@ -16,8 +16,15 @@ request after idle takes ~30-60s to wake, then it's fast.
 
 ## What it does
 
-- Looks up order status, checks refund eligibility, and creates support tickets
-  by calling real (mocked) internal tools -- it doesn't just generate text.
+- Looks up order status, checks refund eligibility, lists a customer's orders and
+  creates support tickets by calling real (mocked) internal tools -- it doesn't
+  just generate text.
+- **Can only ever see the signed-in customer's data.** Every tool is scoped to an
+  identity that is established server-side and injected at execution time;
+  `customer_email` is an `InjectedToolArg`, so it is absent from the schema the
+  model sees. The model cannot supply it, guess it, or be argued into changing
+  it. Another customer's order is reported exactly like a non-existent one, so
+  the agent can't be used to probe which order IDs are real.
 - Answers policy questions (shipping, returns, account) grounded in a small
   retrieval-augmented knowledge base, so it can't invent policy that doesn't exist.
 - **Pauses for human approval before any write action** (e.g. creating a ticket)
@@ -110,6 +117,7 @@ decisively, the prebuilt's `interrupt_before=["tools"]` is all-or-nothing --
 | API            | FastAPI                         | async, auto-docs at `/docs` |
 | Agent          | LangGraph, provider-switchable LLM (`LLM_PROVIDER`: Groq llama-3.3-70b default, or Gemini / Claude) | ReAct tool-calling loop with explicit guardrail + approval nodes; the provider is one env var, so the architecture isn't married to a vendor |
 | Relevance gate | Separate small model (Groq llama-3.1-8b-instant) | topic classification is too fuzzy for keywords; a cheap second model gates traffic without touching the main model's rate limits |
+| Identity       | Resolved server-side (`app/identity.py`), injected into tools via `InjectedToolArg` | authorization must never be a value the model can produce; swap this one module for a JWT and nothing downstream changes |
 | Memory         | LangGraph `SqliteSaver` checkpointer | multi-turn conversation state AND paused approvals survive server restarts, keyed by session_id |
 | Storage        | SQLite (swap `DATABASE_URL` for Postgres/Neon) | zero external dependency, no region-block risk |
 | Retrieval      | scikit-learn TF-IDF              | no embedding-model download at runtime, deploys fast |
@@ -133,27 +141,42 @@ on Gemini or Claude instead, flip `LLM_PROVIDER` and fill the matching API key.
 Open http://localhost:8000 for the chat widget, or drive it directly:
 
 ```bash
-# Read-only tool call -- executes immediately
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Where is order ORD-1001?"}'
+# Start a session -- the server decides which customer you are, and tells you
+# which orders that customer owns. The agent can see no others.
+curl http://localhost:8000/session/new
+# -> {"session_id": "...", "customer_email": "alice@example.com",
+#     "orders": [{"id": "ORD-1001", ...}, {"id": "ORD-1002", ...}]}
 
-# Write action -- pauses for approval. Response includes pending_approval + session_id.
+# Read-only tool call -- executes immediately (use an order the session owns)
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "My chair from ORD-1003 arrived damaged, open a ticket", "session_id": "session-1"}'
+  -d '{"message": "Where is order ORD-1001?", "session_id": "<session_id>"}'
+
+# Someone else's order -- reported exactly like one that doesn't exist
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Where is order ORD-1003?", "session_id": "<session_id>"}'
+
+# Write action -- pauses for approval. Response includes pending_approval.
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "My mouse from ORD-1001 arrived damaged, open a ticket", "session_id": "<session_id>"}'
 
 # Resume: approve or reject the pending action
-curl -X POST http://localhost:8000/approve/session-1 \
+curl -X POST http://localhost:8000/approve/<session_id> \
   -H "Content-Type: application/json" \
   -d '{"approved": true}'
 ```
 
-Try these in the chat widget to see each capability:
-- `"Where is order ORD-1001?"` -> tool call, executes immediately (read-only)
-- `"My chair from ORD-1003 arrived damaged, open a ticket"` -> pauses, shows an
-  Approve/Reject card in the UI -- nothing is written until you click Approve
-- `"I want a refund on ORD-1004, this is unacceptable"` -> escalation (sentiment trigger)
+Try these in the chat widget to see each capability (the suggestion chips are
+built from whichever customer you're signed in as):
+- `"What have I ordered?"` -> lists only this customer's orders
+- `"Where is order <one of yours>?"` -> tool call, executes immediately (read-only)
+- **`"Where is order <one that isn't yours>?"`** -> "not found": the agent cannot
+  see it, and cannot be talked into it
+- `"My <item> from <your order> arrived damaged, open a ticket"` -> pauses, shows
+  an Approve/Reject card -- nothing is written until you click Approve
+- `"this is unacceptable, I want a refund"` -> escalation (sentiment trigger)
 - `"What's your return policy for damaged items?"` -> RAG-grounded answer
 - `"What's a good pasta recipe?"` -> blocked by the relevance gate, main LLM never runs
 - Ask a follow-up in the same session (e.g. "is that the one I just asked about?")
@@ -168,9 +191,9 @@ tool call, pause and approval appears in the audit trail as it happens.
 pytest tests/ -v
 ```
 
-32 tests: guardrail logic (including the relevance gate's block, pass and
+38 tests: guardrail logic (including the relevance gate's block, pass and
 fail-open paths), the deterministic gates (argument shape, look-before-write,
-refund threshold), the typed approve/reject classifier's boundaries, tool
+refund threshold), authorization scoping (another customer's order is invisible, and the model cannot widen its own access), the typed approve/reject classifier's boundaries, tool
 behavior, and -- notably -- the LangGraph plumbing
 itself (`tests/test_agent_flow.py`), using scripted fake LLMs so the
 pause/approve/resume cycle and multi-turn memory are verified against real
@@ -214,5 +237,13 @@ Same agent, same guardrails, same approval gate, reachable from a no-code workfl
   button in the web UI). A production deployment would notify a real reviewer
   (Slack, email, an admin dashboard) rather than relying on someone watching
   the API.
-- The public endpoints have no authentication or rate limiting beyond the
-  webhook's shared secret; both would be prerequisites for real traffic.
+- **Authentication is simulated** (`app/identity.py`): the signed-in customer is
+  derived from the session id, so each visitor gets a different sample customer.
+  In production that module is the only thing that changes -- identity would
+  arrive as a JWT subject claim or session cookie. What is real, and carries over
+  unchanged, is everything downstream: identity is resolved server-side, tools
+  are scoped to it, and the model cannot influence it. As written the session id
+  is client-held, so a visitor can start a new session to be a different sample
+  customer; that is deliberate for the demo and irrelevant to the pattern.
+- The public endpoints have no rate limiting beyond the webhook's shared secret,
+  which would be a prerequisite for real traffic.

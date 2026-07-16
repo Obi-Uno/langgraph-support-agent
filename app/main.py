@@ -1,4 +1,6 @@
 import os
+import uuid
+
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,6 +8,7 @@ from pydantic import BaseModel
 
 from app.db import init_db, SessionLocal, AuditLog
 from app.agent import run_agent, resume_agent
+from app.identity import customer_for_session, orders_for_customer
 from app.seed import run as seed_run
 
 app = FastAPI(
@@ -61,6 +64,24 @@ class ApprovalRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/session/new")
+def new_session():
+    """Start a session and report which customer it is signed in as.
+
+    Identity is derived server-side (see app/identity.py) -- the client receives
+    a session id and is told who it is, but cannot choose. The agent's tools are
+    scoped to this customer, so orders belonging to anyone else are invisible to
+    it and report as "not found".
+    """
+    session_id = str(uuid.uuid4())
+    customer_email = customer_for_session(session_id)
+    return {
+        "session_id": session_id,
+        "customer_email": customer_email,
+        "orders": orders_for_customer(customer_email),
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)

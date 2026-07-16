@@ -151,7 +151,7 @@
         <div class="status-dot" id="status-dot" title="backend status"></div>
         <div class="titles">
           <h1>Acme Support Agent</h1>
-          <p>Tool-calling &middot; RAG &middot; Guardrails &middot; Human-in-the-loop &middot; Memory</p>
+          <p id="signed-in">Tool-calling &middot; RAG &middot; Guardrails &middot; Human-in-the-loop &middot; Memory</p>
         </div>
       </header>
       <details class="guide">
@@ -164,14 +164,17 @@
             <li>Answer policy questions grounded in the store's policy documents</li>
             <li>Remember the conversation — follow-ups like "what about that order?" work</li>
           </ul>
-          <h3>Sample orders you can ask about</h3>
-          <table class="orders-table">
-            <tr><th>Order</th><th>Item</th><th>Status</th><th>Amount</th></tr>
-            <tr><td>ORD-1001</td><td>Wireless Mouse</td><td>shipped</td><td>$79.99</td></tr>
-            <tr><td>ORD-1002</td><td>Mechanical Keyboard</td><td>delivered</td><td>$249.00</td></tr>
-            <tr><td>ORD-1003</td><td>Office Chair</td><td>placed</td><td>$899.00</td></tr>
-            <tr><td>ORD-1004</td><td>Standing Desk</td><td>delivered</td><td>$1,299.00</td></tr>
-            <tr><td>ORD-1005</td><td>USB-C Cable</td><td>refunded</td><td>$45.50</td></tr>
+          <h3>The store's orders — only some are yours</h3>
+          <p style="margin:0 0 6px">You're signed in as a sample customer, so the agent can
+          only see <b>your</b> orders. Ask about one of the others and it reports
+          "not found" — exactly as if the order didn't exist.</p>
+          <table class="orders-table" id="orders-table">
+            <tr><th>Order</th><th>Item</th><th>Status</th><th>Amount</th><th>Yours?</th></tr>
+            <tr data-order="ORD-1001"><td>ORD-1001</td><td>Wireless Mouse</td><td>shipped</td><td>$79.99</td><td class="mine-cell"></td></tr>
+            <tr data-order="ORD-1002"><td>ORD-1002</td><td>Mechanical Keyboard</td><td>delivered</td><td>$249.00</td><td class="mine-cell"></td></tr>
+            <tr data-order="ORD-1003"><td>ORD-1003</td><td>Office Chair</td><td>placed</td><td>$899.00</td><td class="mine-cell"></td></tr>
+            <tr data-order="ORD-1004"><td>ORD-1004</td><td>Standing Desk</td><td>delivered</td><td>$1,299.00</td><td class="mine-cell"></td></tr>
+            <tr data-order="ORD-1005"><td>ORD-1005</td><td>USB-C Cable</td><td>refunded</td><td>$45.50</td><td class="mine-cell"></td></tr>
           </table>
           <h3>Policy knowledge base (RAG)</h3>
           <ul>
@@ -181,6 +184,9 @@
           </ul>
           <h3>Guardrails to try</h3>
           <ul>
+            <li><b>Ask about an order that isn't yours</b> — the agent can't see it at all,
+                and can't be talked into it: identity comes from your session, not from
+                anything you or the model can type</li>
             <li>Ask something off-topic (a recipe, coding help) — rejected before the main model runs</li>
             <li>Use angry or legal wording ("this is a scam", "I'll sue") — escalates to a specialist</li>
             <li>Ask it to open a ticket — nothing is written until you click Approve</li>
@@ -188,12 +194,7 @@
         </div>
       </details>
       <div id="messages"></div>
-      <div class="chips" id="chips">
-        <button class="chip">What is your return policy?</button>
-        <button class="chip">Where is order ORD-1001?</button>
-        <button class="chip">My chair from ORD-1003 arrived damaged, open a ticket</button>
-        <button class="chip">What's a good pasta recipe?</button>
-      </div>
+      <div class="chips" id="chips"></div>
       <form id="chat-form">
         <input id="chat-input" placeholder="Ask about an order, refund, or policy..." autocomplete="off" />
         <button type="submit" class="send-btn" id="send-btn">Send</button>
@@ -231,6 +232,60 @@ const sendBtn = document.getElementById('send-btn');
 fetch(API_BASE + '/health').then(r => r.json()).then(d => {
   if (d.status === 'ok') document.getElementById('status-dot').classList.add('ok');
 }).catch(() => {});
+
+/* ---------- identity ----------
+   The server decides which customer this session is. We only display it: the
+   agent's tools are scoped to it server-side, so orders belonging to anyone
+   else are invisible to the agent no matter what gets typed here. */
+const ALL_ORDERS = ['ORD-1001','ORD-1002','ORD-1003','ORD-1004','ORD-1005'];
+let myOrders = [];
+
+function startSession() {
+  return fetch(API_BASE + '/session/new')
+    .then(r => r.json())
+    .then(d => {
+      sessionId = d.session_id;
+      myOrders = d.orders || [];
+      document.getElementById('signed-in').innerHTML =
+        'Signed in as <b>' + d.customer_email + '</b> &middot; ' +
+        (myOrders.length ? myOrders.length + ' order(s) visible to the agent' : 'no orders');
+      markOwnedOrders();
+      buildChips();
+    })
+    .catch(() => { buildChips(); });
+}
+
+function markOwnedOrders() {
+  const mine = new Set(myOrders.map(o => o.id));
+  document.querySelectorAll('#orders-table tr[data-order]').forEach(tr => {
+    const cell = tr.querySelector('.mine-cell');
+    const isMine = mine.has(tr.dataset.order);
+    cell.textContent = isMine ? 'yours' : '—';
+    cell.style.color = isMine ? 'var(--green)' : 'var(--text-muted)';
+    cell.style.fontWeight = isMine ? '600' : '400';
+    tr.style.opacity = isMine ? '1' : '0.55';
+  });
+}
+
+function buildChips() {
+  const chipsEl = document.getElementById('chips');
+  const first = myOrders[0];
+  const notMine = ALL_ORDERS.find(id => !myOrders.some(o => o.id === id));
+  const chips = ['What is your return policy?'];
+  if (first) {
+    chips.push('Where is order ' + first.id + '?');
+    chips.push('My ' + first.item.toLowerCase() + ' from ' + first.id + ' arrived damaged, open a ticket');
+  }
+  if (notMine) chips.push('Where is order ' + notMine + '?');
+  chips.push("What's a good pasta recipe?");
+  chipsEl.innerHTML = '';
+  chips.forEach(text => {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.textContent = text;
+    chipsEl.appendChild(b);
+  });
+}
 
 
 /* ---------- chat bubbles ---------- */
@@ -453,23 +508,27 @@ document.getElementById('chips').addEventListener('click', function(e) {
 });
 
 /* ---------- welcome message (visual only, not part of the session) ---------- */
-addBubble(
-  "Hi! I'm the support agent for a sample e-commerce store. I can look up orders, " +
+const WELCOME =
+  "Hi! I'm the support agent for a sample e-commerce store. I can look up your orders, " +
   "check refunds, open support tickets (with human sign-off) and answer " +
   "shipping/returns/account policy questions.\n\n" +
-  "New here? Open “What can I ask?” above for the sample orders and " +
-  "things to try, or just click a suggestion below. Orders and tickets are " +
-  "sample data — nothing here is a real purchase.",
-  'agent'
-);
+  "You're signed in as a sample customer — I can only see your orders, not anyone " +
+  "else's. Open “What can I ask?” above to see which are yours and what to try. " +
+  "Orders and tickets are sample data — nothing here is a real purchase.";
+addBubble(WELCOME, 'agent');
 
 document.getElementById('new-session').addEventListener('click', function() {
-  sessionId = null;
   messagesEl.innerHTML = '';
-  auditEl.innerHTML = '<div class="audit-empty">New session started — send a message to begin.</div>';
+  auditEl.innerHTML = '<div class="audit-empty">New session started — you may be signed in as a different customer. Send a message to begin.</div>';
   document.getElementById('audit-sub').textContent = 'Live audit trail — every guardrail decision, tool call and approval is logged';
-  input.focus();
+  startSession().then(function() {
+    addBubble(WELCOME, 'agent');
+    input.focus();
+  });
 });
+
+// a session (and therefore an identity) exists before the first message
+startSession();
 </script>
 </body>
 </html>

@@ -28,24 +28,54 @@ def temp_db(monkeypatch):
         pass
 
 
-def test_lookup_order_found(temp_db):
+def _seed(order_id="ORD-TEST", email="x@example.com"):
     from app.db import SessionLocal, Order
-    import app.tools as tools_module
-
     db = SessionLocal()
-    db.add(Order(id="ORD-TEST", customer_email="x@example.com", status="shipped", amount=10.0, item="Widget"))
+    db.add(Order(id=order_id, customer_email=email, status="shipped", amount=10.0, item="Widget"))
     db.commit()
     db.close()
 
-    result = tools_module.lookup_order.invoke({"order_id": "ORD-TEST"})
+
+def test_lookup_order_found(temp_db):
+    import app.tools as tools_module
+    _seed()
+
+    result = tools_module.lookup_order.invoke(
+        {"order_id": "ORD-TEST", "customer_email": "x@example.com"}
+    )
     assert "ORD-TEST" in result
     assert "shipped" in result
 
 
 def test_lookup_order_not_found(temp_db):
     import app.tools as tools_module
-    result = tools_module.lookup_order.invoke({"order_id": "DOES-NOT-EXIST"})
+    result = tools_module.lookup_order.invoke(
+        {"order_id": "DOES-NOT-EXIST", "customer_email": "x@example.com"}
+    )
     assert "No order found" in result
+
+
+def test_lookup_order_is_scoped_to_the_customer(temp_db):
+    """The tool itself is scoped -- not just the graph. Someone else's order is
+    indistinguishable from a missing one, and leaks nothing."""
+    import app.tools as tools_module
+    _seed(email="owner@example.com")
+
+    result = tools_module.lookup_order.invoke(
+        {"order_id": "ORD-TEST", "customer_email": "someone-else@example.com"}
+    )
+    assert result == "No order found with ID ORD-TEST."
+    assert "Widget" not in result
+
+
+def test_list_my_orders_only_returns_that_customers_orders(temp_db):
+    import app.tools as tools_module
+    _seed(order_id="ORD-MINE", email="me@example.com")
+    _seed(order_id="ORD-THEIRS", email="them@example.com")
+
+    result = tools_module.list_my_orders.invoke({"customer_email": "me@example.com"})
+    assert "ORD-MINE" in result
+    assert "ORD-THEIRS" not in result
 
 
 def test_create_support_ticket(temp_db):

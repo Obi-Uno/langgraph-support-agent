@@ -40,13 +40,14 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from app.tools import ALL_TOOLS
+from app.tools import ALL_TOOLS, IDENTITY_SCOPED_TOOLS
 from app.rag import retrieve_as_context
 from app.guardrails import (
     should_escalate, validate_write_action, validate_tool_args, is_write_action,
     check_grounding, check_relevance, check_refund_threshold,
 )
 from app.db import SessionLocal, log_event, Order
+from app.identity import customer_for_session
 
 # LLM_PROVIDER swaps the model backend without touching any agent logic:
 # "groq", "gemini" or "anthropic". Keeping the provider behind one env var is
@@ -127,6 +128,7 @@ Relevant policy context for this conversation:
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     session_id: str
+    customer_email: str  # signed-in customer; injected into tools, never model-supplied
     escalated: bool
     escalation_reason: str
     pending_decision: str  # "", "approve", or "reject" -- set by a human reviewer
@@ -272,6 +274,7 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         decision = state.get("pending_decision", "")
         escalated = state.get("escalated", False)
         escalation_reason = state.get("escalation_reason", "")
+        customer_email = state.get("customer_email", "")
         verified = _verified_order_ids(state["messages"])
 
         # Reads before writes so that a lookup issued in the SAME batch can
@@ -279,7 +282,17 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         calls = sorted(last_ai.tool_calls, key=lambda c: is_write_action(c["name"]))
         try:
             for call in calls:
-                name, args, call_id = call["name"], call["args"], call["id"]
+                name, call_id = call["name"], call["id"]
+                args = dict(call["args"] or {})
+
+                # AUTHORIZATION: bind the tool to the session's signed-in customer.
+                # customer_email is an InjectedToolArg, so the model never sees it
+                # in the schema and cannot supply it -- but we overwrite it here
+                # regardless, so that even a model that somehow produced the key
+                # cannot widen its own access. Identity flows from the session,
+                # never from the conversation.
+                if name in IDENTITY_SCOPED_TOOLS:
+                    args["customer_email"] = customer_email
 
                 # Typed boundary: validate argument SHAPE before any tool runs.
                 shape_ok, shape_reason = validate_tool_args(name, args)
@@ -308,7 +321,14 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                     # A non-existent order (the ORD-9999 case) is refused outright.
                     order_id = args.get("order_id")
                     if order_id and order_id not in verified:
-                        order_exists = db.query(Order).filter(Order.id == order_id).first() is not None
+                        # scoped by customer: an order belonging to someone else is
+                        # treated exactly like one that does not exist
+                        order_exists = (
+                            db.query(Order)
+                            .filter(Order.id == order_id, Order.customer_email == customer_email)
+                            .first()
+                            is not None
+                        )
                         if not order_exists:
                             reason = (
                                 f"Blocked: {name} for order {order_id}, which does not exist. "
@@ -340,7 +360,11 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                     # regardless of what the model decided. The ticket is still
                     # created (it's the record), per policy.
                     if order_id:
-                        order = db.query(Order).filter(Order.id == order_id).first()
+                        order = (
+                            db.query(Order)
+                            .filter(Order.id == order_id, Order.customer_email == customer_email)
+                            .first()
+                        )
                         if order is not None:
                             over, threshold_reason = check_refund_threshold(order.amount)
                             if over:
@@ -556,6 +580,8 @@ def run_agent(user_message, session_id=None, graph=None):
     result = graph.invoke({
         "messages": [HumanMessage(content=user_message)],
         "session_id": session_id,
+        # resolved server-side from the session, never taken from the request body
+        "customer_email": customer_for_session(session_id),
         "escalated": False,
         "escalation_reason": "",
         "pending_decision": "",

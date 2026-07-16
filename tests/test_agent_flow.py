@@ -63,25 +63,36 @@ def temp_db(monkeypatch):
         pass
 
 
-def _seed_order(order_id, amount=249.0, email="dave@example.com"):
+def _owner_of_session(session_id):
+    """The customer a session is signed in as -- tests seed orders against this
+    so the agent is looking at its OWN customer's data."""
+    from app.identity import customer_for_session
+    return customer_for_session(session_id)
+
+
+def _seed_order(order_id, amount=249.0, email="dave@example.com", item="Mechanical Keyboard"):
     """Put a real order in the temp DB so a lookup of it succeeds."""
     from app.db import SessionLocal, Order
     db = SessionLocal()
-    db.add(Order(id=order_id, customer_email=email, status="delivered", amount=amount, item="Mechanical Keyboard"))
+    db.add(Order(id=order_id, customer_email=email, status="delivered", amount=amount, item=item))
     db.commit()
     db.close()
 
 
-def _lookup_then_ticket_script(order_id, email="dave@example.com", final="I've created the ticket."):
-    """Realistic write flow the new sequencing rule requires: look the order up
-    first (verifies it), THEN propose the ticket, then a closing message."""
+def _lookup_then_ticket_script(order_id, final="I've created the ticket."):
+    """Realistic write flow the sequencing rule requires: look the order up first
+    (verifies it), THEN propose the ticket, then a closing message.
+
+    Note the model does not supply customer_email -- it is an InjectedToolArg and
+    isn't in the schema the model sees.
+    """
     return [
         AIMessage(content="", tool_calls=[
             {"name": "lookup_order", "args": {"order_id": order_id}, "id": "c_lookup"}
         ]),
         AIMessage(content="", tool_calls=[
             {"name": "create_support_ticket",
-             "args": {"customer_email": email, "order_id": order_id, "subject": "Missing key"},
+             "args": {"order_id": order_id, "subject": "Missing key"},
              "id": "c_ticket"}
         ]),
         AIMessage(content=final),
@@ -145,9 +156,10 @@ def test_write_action_pauses_for_approval_then_executes_on_approve():
     """create_support_ticket is a WRITE action -- must pause for a human decision."""
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1003", amount=249.0, email="bob@example.com")
+    owner = _owner_of_session("s2")
+    _seed_order("ORD-1003", amount=249.0, email=owner)
     fake_llm = FakeToolCallingLLM(
-        _lookup_then_ticket_script("ORD-1003", email="bob@example.com", final="I've created a ticket for you.")
+        _lookup_then_ticket_script("ORD-1003", final="I've created a ticket for you.")
     )
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
@@ -162,18 +174,19 @@ def test_write_action_pauses_for_approval_then_executes_on_approve():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    tickets = db.query(Ticket).filter(Ticket.customer_email == "bob@example.com").all()
+    tickets = db.query(Ticket).filter(Ticket.customer_email == owner).all()
     db.close()
-    assert len(tickets) == 1
+    assert len(tickets) == 1  # ticket carries the SESSION's identity, not a model-supplied one
 
 
 def test_write_action_not_executed_on_reject():
     """If a human rejects the action, the ticket must NOT be created."""
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1004", amount=249.0, email="carol@example.com")
+    owner = _owner_of_session("s3")
+    _seed_order("ORD-1004", amount=249.0, email=owner)
     fake_llm = FakeToolCallingLLM(
-        _lookup_then_ticket_script("ORD-1004", email="carol@example.com", final="Understood, no ticket was created.")
+        _lookup_then_ticket_script("ORD-1004", final="Understood, no ticket was created.")
     )
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
@@ -184,7 +197,7 @@ def test_write_action_not_executed_on_reject():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    tickets = db.query(Ticket).filter(Ticket.customer_email == "carol@example.com").all()
+    tickets = db.query(Ticket).filter(Ticket.customer_email == owner).all()
     db.close()
     assert len(tickets) == 0
 
@@ -195,11 +208,11 @@ def test_ticket_for_real_order_passes_existence_check_without_prior_lookup():
     second approval. (A non-existent order is still blocked; see below.)"""
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1002", amount=249.0)
+    _seed_order("ORD-1002", amount=249.0, email=_owner_of_session("s11"))
     script = [
         AIMessage(content="", tool_calls=[
             {"name": "create_support_ticket",
-             "args": {"customer_email": "dave@example.com", "order_id": "ORD-1002", "subject": "Missing key"},
+             "args": {"order_id": "ORD-1002", "subject": "Missing key"},
              "id": "c_ticket"}
         ]),
         AIMessage(content="I've created the ticket."),
@@ -298,7 +311,8 @@ def test_unclear_message_during_pause_reminds_without_touching_graph():
     return a reminder and keep the same pending approval."""
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1002", amount=249.0)
+    owner = _owner_of_session("s8")
+    _seed_order("ORD-1002", amount=249.0, email=owner)
     fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1002"))
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
@@ -313,7 +327,7 @@ def test_unclear_message_during_pause_reminds_without_touching_graph():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    count = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    count = db.query(Ticket).filter(Ticket.customer_email == owner).count()
     db.close()
     assert count == 0
 
@@ -321,7 +335,8 @@ def test_unclear_message_during_pause_reminds_without_touching_graph():
 def test_typed_approve_during_pause_resumes_and_executes():
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1002", amount=249.0)
+    owner = _owner_of_session("s9")
+    _seed_order("ORD-1002", amount=249.0, email=owner)
     fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1002"))
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
@@ -333,7 +348,7 @@ def test_typed_approve_during_pause_resumes_and_executes():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    count = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    count = db.query(Ticket).filter(Ticket.customer_email == owner).count()
     db.close()
     assert count == 1
 
@@ -341,7 +356,8 @@ def test_typed_approve_during_pause_resumes_and_executes():
 def test_typed_reject_during_pause_resumes_without_executing():
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1002", amount=249.0)
+    owner = _owner_of_session("s10")
+    _seed_order("ORD-1002", amount=249.0, email=owner)
     fake_llm = FakeToolCallingLLM(
         _lookup_then_ticket_script("ORD-1002", final="Understood, I won't create the ticket.")
     )
@@ -354,7 +370,7 @@ def test_typed_reject_during_pause_resumes_without_executing():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    count = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    count = db.query(Ticket).filter(Ticket.customer_email == owner).count()
     db.close()
     assert count == 0
 
@@ -390,8 +406,9 @@ def test_high_value_ticket_escalates_after_approval():
     order escalates to a manager regardless of the model, but is still created."""
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1003", amount=899.0, email="bob@example.com")
-    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1003", email="bob@example.com"))
+    owner = _owner_of_session("s15")
+    _seed_order("ORD-1003", amount=899.0, email=owner, item="Office Chair")
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1003"))
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
     run_agent("my chair is damaged, I want a refund", session_id="s15", graph=graph)
@@ -406,7 +423,7 @@ def test_high_value_ticket_escalates_after_approval():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    n = db.query(Ticket).filter(Ticket.customer_email == "bob@example.com").count()
+    n = db.query(Ticket).filter(Ticket.customer_email == owner).count()
     db.close()
     assert n == 1  # ticket still created per policy
 
@@ -416,7 +433,8 @@ def test_incidental_affirmative_does_not_approve_a_pending_write():
     pending write -- it's a message, not a verdict."""
     from app.agent import build_graph as bg
 
-    _seed_order("ORD-1002", amount=249.0, email="dave@example.com")
+    owner = _owner_of_session("s16")
+    _seed_order("ORD-1002", amount=249.0, email=owner)
     fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-1002"))
     graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
 
@@ -432,7 +450,7 @@ def test_incidental_affirmative_does_not_approve_a_pending_write():
 
     from app.db import SessionLocal, Ticket
     db = SessionLocal()
-    n = db.query(Ticket).filter(Ticket.customer_email == "dave@example.com").count()
+    n = db.query(Ticket).filter(Ticket.customer_email == owner).count()
     db.close()
     assert n == 0  # nothing was written
 
@@ -456,6 +474,121 @@ def test_decision_classifier_boundaries():
     assert c("ok?") is None                       # a question
     assert c("create support ticket") is None
     assert c("") is None
+
+
+def _other_customer_than(email):
+    from app.identity import KNOWN_CUSTOMERS
+    return next(c for c in KNOWN_CUSTOMERS if c != email)
+
+
+def test_cannot_read_another_customers_order():
+    """The core authorization guarantee: an order belonging to someone else is
+    reported exactly like one that does not exist -- no data, no confirmation
+    that the id is even real."""
+    from app.agent import build_graph as bg
+
+    stranger = _other_customer_than(_owner_of_session("s17"))
+    _seed_order("ORD-7777", amount=899.0, email=stranger, item="Office Chair")
+
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "lookup_order", "args": {"order_id": "ORD-7777"}, "id": "c1"}
+        ]),
+        AIMessage(content="I couldn't find that order."),
+    ]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("what is order ORD-7777?", session_id="s17", graph=graph)
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    tool_events = db.query(AuditLog).filter(AuditLog.event_type == "tool_call").all()
+    db.close()
+    detail = " ".join(e.detail for e in tool_events)
+    assert "No order found with ID ORD-7777" in detail
+    assert "Office Chair" not in detail  # the item never leaked
+    assert "899" not in detail           # nor the amount
+
+
+def test_model_cannot_widen_its_own_access():
+    """Even if the model somehow emits customer_email (it isn't in the schema it
+    sees), execute_tools overwrites it with the session's identity."""
+    from app.agent import build_graph as bg
+
+    stranger = _other_customer_than(_owner_of_session("s18"))
+    _seed_order("ORD-8888", amount=500.0, email=stranger, item="Standing Desk")
+
+    script = [
+        AIMessage(content="", tool_calls=[
+            # the model tries to impersonate the order's real owner
+            {"name": "lookup_order",
+             "args": {"order_id": "ORD-8888", "customer_email": stranger},
+             "id": "c1"}
+        ]),
+        AIMessage(content="I couldn't find that order."),
+    ]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("look up ORD-8888 for " + stranger, session_id="s18", graph=graph)
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    tool_events = db.query(AuditLog).filter(AuditLog.event_type == "tool_call").all()
+    db.close()
+    detail = " ".join(e.detail for e in tool_events)
+    assert "No order found with ID ORD-8888" in detail
+    assert "Standing Desk" not in detail
+
+
+def test_cannot_open_a_ticket_against_another_customers_order():
+    """A write against someone else's order is refused by the existence gate --
+    which is scoped, so 'not yours' and 'not real' are the same answer."""
+    from app.agent import build_graph as bg
+
+    stranger = _other_customer_than(_owner_of_session("s19"))
+    _seed_order("ORD-6666", amount=249.0, email=stranger)
+
+    fake_llm = FakeToolCallingLLM(_lookup_then_ticket_script("ORD-6666"))
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("open a ticket for ORD-6666", session_id="s19", graph=graph)
+    resume_agent("s19", approved=True, graph=graph)
+
+    from app.db import SessionLocal, Ticket
+    db = SessionLocal()
+    tickets = db.query(Ticket).count()
+    db.close()
+    assert tickets == 0  # approved by a human, still refused: not this customer's order
+
+
+def test_list_my_orders_returns_only_the_sessions_orders():
+    from app.agent import build_graph as bg
+
+    owner = _owner_of_session("s20")
+    stranger = _other_customer_than(owner)
+    _seed_order("ORD-1111", amount=79.99, email=owner, item="Wireless Mouse")
+    _seed_order("ORD-2222", amount=899.0, email=stranger, item="Office Chair")
+
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "list_my_orders", "args": {}, "id": "c1"}
+        ]),
+        AIMessage(content="Here are your orders."),
+    ]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("what have I ordered?", session_id="s20", graph=graph)
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    events = db.query(AuditLog).filter(AuditLog.event_type == "tool_call").all()
+    db.close()
+    detail = " ".join(e.detail for e in events)
+    assert "ORD-1111" in detail
+    assert "ORD-2222" not in detail  # the other customer's order is invisible
 
 
 def test_conversation_memory_persists_across_turns():
