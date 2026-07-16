@@ -54,6 +54,12 @@
   .orders-table td:first-child { font-family: ui-monospace, monospace; font-size: 11.5px; }
 
   #messages { height: 440px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; background: var(--bg); }
+  /* flex-shrink:0 on every child of #messages: it's a fixed-height flex column,
+     and the default flex-shrink:1 squashes children once the conversation
+     outgrows the panel instead of letting it scroll. That silently collapsed
+     the approval card to ~2px (its overflow:hidden then clipped the buttons),
+     so the pause looked like a dead end. */
+  #messages > * { flex-shrink: 0; }
   .bubble { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: break-word; }
   .user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 4px; }
   .agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
