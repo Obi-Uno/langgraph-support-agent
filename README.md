@@ -45,17 +45,19 @@ request after idle takes ~30-60s to wake, then it's fast.
 ```mermaid
 flowchart TD
     U[User message] --> R[Risk check + relevance gate]
-    R -->|escalation trigger| ESC[Escalate to human]
     R -->|off-topic| OT[Canned refusal - main LLM never runs]
-    R -->|on-topic| M[LLM: decide response or tool call]
-    M -->|read-only tool call| T[Execute tool]
+    R -->|on-topic| M[LLM: reason, then decide response or tool call]
+    M -->|read-only tool call| T[Execute tool: shape + existence + threshold gates]
     M -->|write tool call| WAIT[Pause: await human approval]
     M -->|no tool call| GC[Grounding check]
     WAIT -->|reviewer approves/rejects via /approve| T
     T --> M
     GC --> OUT[Response to user]
-    ESC --> OUT
     OT --> OUT
+
+    R -.->|risk keywords| ESC
+    T -.->|refund over threshold, post-approval| ESC
+    ESC[Escalation flag] -.->|overrides the final reply with a specialist hand-off| OUT
 
     subgraph Memory
       CP[(LangGraph checkpointer, keyed by session_id)]
@@ -67,10 +69,18 @@ flowchart TD
       AL[(audit_log table)]
     end
     R -.log.-> AL
+    M -.log reasoning.-> AL
     T -.log.-> AL
     WAIT -.log.-> AL
     GC -.log.-> AL
 ```
+
+Note that escalation does **not** short-circuit the graph: an escalating message
+still runs the model and its tools (so the specialist inherits a full audit trail
+and any lookups already done), and the escalation flag then overrides the
+customer-facing reply. It can be raised in two places -- risk keywords before the
+model runs, and the hard refund-amount check, which fires only after a write is
+approved.
 
 Everything above is implemented as a LangGraph state graph (`app/agent.py`),
 compiled with `interrupt_before=["await_approval"]` so execution genuinely
@@ -146,8 +156,10 @@ tool call, pause and approval appears in the audit trail as it happens.
 pytest tests/ -v
 ```
 
-18 tests: guardrail logic (including the relevance gate's block, pass and
-fail-open paths), tool behavior, and -- notably -- the LangGraph plumbing
+32 tests: guardrail logic (including the relevance gate's block, pass and
+fail-open paths), the deterministic gates (argument shape, look-before-write,
+refund threshold), the typed approve/reject classifier's boundaries, tool
+behavior, and -- notably -- the LangGraph plumbing
 itself (`tests/test_agent_flow.py`), using scripted fake LLMs so the
 pause/approve/resume cycle and multi-turn memory are verified against real
 graph execution, not just guardrail functions in isolation. No API key or
