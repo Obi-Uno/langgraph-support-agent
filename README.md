@@ -191,7 +191,7 @@ tool call, pause and approval appears in the audit trail as it happens.
 pytest tests/ -v
 ```
 
-38 tests: guardrail logic (including the relevance gate's block, pass and
+43 tests: guardrail logic (including the relevance gate's block, pass and
 fail-open paths), the deterministic gates (argument shape, look-before-write,
 refund threshold), authorization scoping (another customer's order is invisible, and the model cannot widen its own access), the typed approve/reject classifier's boundaries, tool
 behavior, and -- notably -- the LangGraph plumbing

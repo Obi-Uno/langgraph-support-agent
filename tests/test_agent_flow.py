@@ -591,6 +591,116 @@ def test_list_my_orders_returns_only_the_sessions_orders():
     assert "ORD-2222" not in detail  # the other customer's order is invisible
 
 
+def test_policy_dollar_amounts_are_not_flagged_as_ungrounded():
+    """A figure quoted from the policy docs ($15 expedited shipping) is grounded.
+    ground_check must see the retrieved policy, not just tool output, or it flags
+    a correct answer."""
+    from app.agent import build_graph as bg
+
+    script = [AIMessage(
+        content="Standard shipping takes 3-5 business days; expedited (2-day) is an additional $15."
+    )]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("how long does shipping take?", session_id="s21", graph=graph)
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    responses = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s21", AuditLog.event_type == "response")
+        .all()
+    )
+    db.close()
+    assert responses, "expected a response event"
+    assert not any("FLAGGED" in r.detail for r in responses), (
+        "a $ figure that appears in the policy docs must not be flagged"
+    )
+
+
+def test_invented_dollar_amount_is_still_flagged():
+    """The grounding check must still catch a figure backed by nothing."""
+    from app.agent import build_graph as bg
+
+    script = [AIMessage(content="I've refunded you $9999.00 for that order.")]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    run_agent("what about my refund?", session_id="s22", graph=graph)
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    responses = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s22", AuditLog.event_type == "response")
+        .all()
+    )
+    db.close()
+    assert any("FLAGGED" in r.detail and "9999" in r.detail for r in responses)
+
+
+def test_tool_call_written_as_text_is_not_shown_to_the_customer():
+    """llama sometimes writes a tool call as text instead of calling it. The
+    tool doesn't run -- but the raw syntax must never reach the customer."""
+    from app.agent import build_graph as bg
+
+    script = [AIMessage(
+        content='I need to look up the order first to confirm it exists. '
+                '<function=lookup_order>{"order_id": "ORD-1003"}</function>'
+    )]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    result = run_agent("I want to open a ticket", session_id="s23", graph=graph)
+
+    assert "<function" not in result["reply"]
+    assert "lookup_order" not in result["reply"]
+    assert "order_id" not in result["reply"]
+    assert result["reply"]  # still says something to the customer
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    flagged = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s23", AuditLog.event_type == "malformed_response")
+        .count()
+    )
+    db.close()
+    assert flagged == 1  # and it's visible in the audit trail for diagnosis
+
+
+def test_thought_prefix_never_reaches_the_customer():
+    """Asking for a rationale before tool use tempts the model to label its final
+    answer "Thought: ...". Reasoning is for the audit trail, not the customer."""
+    from app.agent import build_graph as bg
+
+    script = [AIMessage(
+        content="Thought: the user wants shipping times, I'll quote the policy.\n"
+                "Standard shipping takes 3-5 business days."
+    )]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    result = run_agent("how long does shipping take?", session_id="s25", graph=graph)
+
+    assert not result["reply"].lower().startswith("thought")
+    assert "Standard shipping takes 3-5 business days." in result["reply"]
+
+
+def test_reply_that_is_only_tool_syntax_falls_back_gracefully():
+    from app.agent import build_graph as bg
+
+    script = [AIMessage(content='<function=lookup_order>{"order_id": "ORD-1003"}</function>')]
+    fake_llm = FakeToolCallingLLM(script)
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    result = run_agent("open a ticket", session_id="s24", graph=graph)
+
+    assert "<function" not in result["reply"]
+    assert "rephrase" in result["reply"].lower()  # honest fallback, not an empty bubble
+
+
 def test_conversation_memory_persists_across_turns():
     """Second call with the same session_id should retain the first message
     in state -- proving the checkpointer is actually wiring up memory."""

@@ -115,9 +115,11 @@ Rules you MUST follow:
 - Only state policy facts that appear in the provided policy context below.
 - Before creating a support ticket about an order, you MUST first call lookup_order for that order in this conversation to confirm it exists. Never call create_support_ticket for an order you have not looked up.
 - If a refund or damaged-item issue needs human review, call create_support_ticket instead of promising a resolution yourself.
-- When you decide to use a tool, first briefly state your reasoning in ONE short
-  sentence (your "thought"), then make the tool call. This reasoning is logged
-  internally for traceability -- keep it professional.
+- When you use a tool, precede it with ONE short sentence saying why. Never label
+  it "Thought:", and never include reasoning when you are answering the customer
+  directly -- your final answer must read as a normal reply, not as notes.
+- Invoke tools through the tool interface only: NEVER write a function call, XML
+  tag or JSON payload as text in your reply.
 - Be concise and friendly.
 
 Relevant policy context for this conversation:
@@ -129,6 +131,7 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     session_id: str
     customer_email: str  # signed-in customer; injected into tools, never model-supplied
+    policy_context: str  # RAG text given to the model; ground_check needs it too
     escalated: bool
     escalation_reason: str
     pending_decision: str  # "", "approve", or "reject" -- set by a human reviewer
@@ -252,7 +255,10 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
                 log_event(db, state["session_id"], "reasoning", str(response.content).strip())
             finally:
                 db.close()
-        return {"messages": [response]}
+        # carry the retrieved policy forward: ground_check has to know a figure
+        # like "$15 expedited shipping" came from the policy docs, or it flags
+        # a correct answer as ungrounded.
+        return {"messages": [response], "policy_context": policy_context}
 
     def await_approval(state: AgentState) -> AgentState:
         db = SessionLocal()
@@ -396,8 +402,11 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         try:
             final: AIMessage = state["messages"][-1]
             if isinstance(final, AIMessage) and final.content:
+                # everything the answer is allowed to be grounded in: what the
+                # tools returned AND the policy text that was retrieved for it
                 context = "\n".join(
-                    m.content for m in state["messages"] if isinstance(m, ToolMessage)
+                    [m.content for m in state["messages"] if isinstance(m, ToolMessage)]
+                    + [state.get("policy_context", "")]
                 )
                 grounded, reason = check_grounding(str(final.content), context)
                 log_event(
@@ -535,17 +544,55 @@ def _final_reply_from_state(values):
     return final_message.content if isinstance(final_message, AIMessage) else str(final_message.content)
 
 
+# llama-family models occasionally emit a tool call as TEXT --
+# "<function=lookup_order>{"order_id": "ORD-1003"}</function>" -- instead of
+# using the tool-calling interface. The tool never runs, and the raw syntax
+# would be shown to the customer. We can't stop the model doing it, but we can
+# refuse to leak internals: strip it, and if nothing usable is left, say so
+# honestly rather than emit a half sentence promising an action that never came.
+_TOOL_SYNTAX_RE = re.compile(
+    r"<\s*function\s*=[^>]*>.*?(?:</\s*function\s*>|$)", re.IGNORECASE | re.DOTALL
+)
+
+# Asking for a one-line rationale before tool use also tempts the model to label
+# its final answer "Thought: ...". Reasoning belongs in the audit trail, never in
+# the customer's reply -- strip a leading Thought: line if one shows up anyway.
+_THOUGHT_PREFIX_RE = re.compile(r"^\s*thought\s*:\s*.*?(?:\n+|$)", re.IGNORECASE)
+
+MALFORMED_REPLY = (
+    "Sorry -- I got tangled up processing that. Could you rephrase it, or tell me "
+    "the order number you're asking about?"
+)
+
+
+def _clean_reply(text) -> str:
+    cleaned = _TOOL_SYNTAX_RE.sub("", str(text or ""))
+    cleaned = _THOUGHT_PREFIX_RE.sub("", cleaned, count=1)
+    return cleaned.strip()
+
+
 def _reply_for_result(result):
     """Customer-facing reply for a completed run, applying the escalation
     override. Shared by run_agent AND resume_agent: the refund-threshold
     escalation only fires after approval (inside a resumed run), so if resume
     skipped this the customer would get a plain reply while the API reported
     escalated=true."""
-    reply = _final_reply_from_state(result)
     if result.get("escalated"):
         reason = result.get("escalation_reason", "")
-        reply = f"I'm connecting you with a specialist for this. {reason} Someone will follow up shortly."
-    return reply
+        return f"I'm connecting you with a specialist for this. {reason} Someone will follow up shortly."
+
+    raw = _final_reply_from_state(result)
+    reply = _clean_reply(raw)
+    if reply != str(raw).strip():
+        db = SessionLocal()
+        try:
+            log_event(
+                db, result.get("session_id", "unknown"), "malformed_response",
+                f"Model wrote a tool call as text instead of calling it; stripped before reply. Raw: {str(raw)[:200]!r}",
+            )
+        finally:
+            db.close()
+    return reply or MALFORMED_REPLY
 
 
 def run_agent(user_message, session_id=None, graph=None):
