@@ -47,8 +47,11 @@ def lookup_order(order_id: str, customer_email: Annotated[str, InjectedToolArg] 
 
 @tool
 def check_refund_status(order_id: str, customer_email: Annotated[str, InjectedToolArg] = "") -> str:
-    """Check whether one of the customer's orders has been refunded and for how much.
-    Use this when a customer asks about a refund.
+    """Check whether one specific order has been refunded, and for how much.
+
+    Use this for the state of an actual order ("was I refunded for ORD-1005?").
+    Do NOT use it for questions about the refund *policy* (how long refunds take,
+    what qualifies) -- those are answered from the policy context, not the database.
     """
     db = SessionLocal()
     try:
