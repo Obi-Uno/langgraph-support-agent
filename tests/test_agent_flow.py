@@ -670,6 +670,58 @@ def test_tool_call_written_as_text_is_not_shown_to_the_customer():
     assert flagged == 1  # and it's visible in the audit trail for diagnosis
 
 
+class _RateLimitedLLM:
+    """Stands in for a provider that is over its quota."""
+
+    class RateLimitError(Exception):
+        status_code = 429
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        raise self.RateLimitError("Rate limit reached for model X (TPD)")
+
+
+def test_rate_limited_provider_returns_a_friendly_reply_not_a_500():
+    """A provider quota error must not surface as an Internal Server Error --
+    the widget should admit it's busy."""
+    from app.agent import build_graph as bg
+
+    graph = bg(llm_client=_RateLimitedLLM(), checkpointer=MemorySaver())
+    result = run_agent("where is my order?", session_id="s27", graph=graph)
+
+    assert "try again" in result["reply"].lower()
+    assert result["pending_approval"] is None
+    assert result["escalated"] is False
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    logged = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s27", AuditLog.event_type == "provider_error")
+        .count()
+    )
+    db.close()
+    assert logged == 1  # visible in the trail for diagnosis
+
+
+def test_non_rate_limit_errors_still_propagate():
+    """Only quota errors get the friendly path -- a real bug must not hide."""
+    from app.agent import build_graph as bg
+
+    class Boom:
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            raise ValueError("a genuine bug")
+
+    graph = bg(llm_client=Boom(), checkpointer=MemorySaver())
+    with pytest.raises(Exception):
+        run_agent("where is my order?", session_id="s28", graph=graph)
+
+
 def test_greeting_is_answered_without_a_data_lookup():
     """A greeting should get a friendly reply, not the customer's order history.
     Scripted here because the guarantee we can enforce is that a no-tool reply

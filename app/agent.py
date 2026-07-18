@@ -133,8 +133,11 @@ WHAT YOU MAY DO
   list_my_orders -- before creating a ticket about it. Never create a ticket for
   an order you have not seen in this conversation.
 - When a customer reports a problem but doesn't give an order ID, call
-  list_my_orders and work out which order they mean, instead of asking them to
-  recall an ID.
+  list_my_orders first rather than asking them to recall one. If exactly one of
+  their orders plausibly matches, proceed with it. If more than one could match,
+  ask which one they mean -- NEVER guess which order a customer is talking about
+  before creating a ticket. Getting this wrong files a real record against the
+  wrong purchase.
 - If a refund or damaged-item issue needs human review, call create_support_ticket
   instead of promising a resolution yourself. Give the ticket a specific subject
   naming the item and the problem.
@@ -558,6 +561,42 @@ def _classify_decision(message: str):
     return None  # both or neither ("no wait, yes") -> ask again
 
 
+BUSY_REPLY = (
+    "Sorry -- I'm handling a lot of requests right now and can't get to this one. "
+    "Please try again in a minute."
+)
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    """Provider-agnostic detection of an upstream rate limit.
+
+    Kept deliberately narrow: only 429s / RateLimitError. Everything else must
+    keep propagating, or a real bug would hide behind a friendly message.
+    """
+    if getattr(exc, "status_code", None) == 429 or getattr(
+        getattr(exc, "response", None), "status_code", None
+    ) == 429:
+        return True
+    name = type(exc).__name__.lower()
+    return "ratelimit" in name or "resourceexhausted" in name
+
+
+def _busy_response(session_id, exc):
+    """A rate-limited model must not surface as a 500. A support widget that
+    says "Internal Server Error" is worse than one that admits it's busy."""
+    db = SessionLocal()
+    try:
+        log_event(db, session_id, "provider_error", f"Upstream rate limit: {str(exc)[:300]}")
+    finally:
+        db.close()
+    return {
+        "session_id": session_id,
+        "reply": BUSY_REPLY,
+        "escalated": False,
+        "pending_approval": None,
+    }
+
+
 def _log_interrupt(session_id, pending):
     """The interrupt fires BEFORE the await_approval node runs, so nothing is
     in the audit trail yet at pause time -- log the pause itself so the trail
@@ -655,16 +694,21 @@ def run_agent(user_message, session_id=None, graph=None):
             "pending_approval": pending,
         }
 
-    result = graph.invoke({
-        "messages": [HumanMessage(content=user_message)],
-        "session_id": session_id,
-        # resolved server-side from the session, never taken from the request body
-        "customer_email": customer_for_session(session_id),
-        "escalated": False,
-        "escalation_reason": "",
-        "pending_decision": "",
-        "off_topic": False,
-    }, config=config)
+    try:
+        result = graph.invoke({
+            "messages": [HumanMessage(content=user_message)],
+            "session_id": session_id,
+            # resolved server-side from the session, never taken from the request body
+            "customer_email": customer_for_session(session_id),
+            "escalated": False,
+            "escalation_reason": "",
+            "pending_decision": "",
+            "off_topic": False,
+        }, config=config)
+    except Exception as exc:  # noqa: BLE001 -- re-raised unless it's a rate limit
+        if not _is_rate_limited(exc):
+            raise
+        return _busy_response(session_id, exc)
 
     pending = _extract_pending_approval(graph, config)
     if pending:
@@ -698,7 +742,13 @@ def resume_agent(session_id, approved, graph=None):
         }
 
     graph.update_state(config, {"pending_decision": "approve" if approved else "reject"})
-    result = graph.invoke(None, config=config)
+    try:
+        result = graph.invoke(None, config=config)
+    except Exception as exc:  # noqa: BLE001 -- re-raised unless it's a rate limit
+        if not _is_rate_limited(exc):
+            raise
+        # the decision is already persisted, so the reviewer can retry the resume
+        return _busy_response(session_id, exc)
 
     pending = _extract_pending_approval(graph, config)
     if pending:
