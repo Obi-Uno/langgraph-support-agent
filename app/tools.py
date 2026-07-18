@@ -69,9 +69,14 @@ def check_refund_status(order_id: str, customer_email: Annotated[str, InjectedTo
 @tool
 def list_my_orders(customer_email: Annotated[str, InjectedToolArg] = "") -> str:
     """List all of the current customer's orders, with item, status and amount.
-    Use this when the customer asks what they have ordered, or when they describe
-    an issue without giving an order ID -- it is better than asking them to
-    remember one.
+
+    Use this when the customer asks what they have ordered, or when they raise a
+    specific problem with an order they haven't identified ("my chair is
+    damaged") -- listing beats asking them to remember an ID.
+
+    Do NOT call this for greetings, thanks, or small talk ("hi", "hello", "thank
+    you"), and not for general policy questions. Those need a friendly reply, not
+    the customer's purchase history.
     """
     db = SessionLocal()
     try:

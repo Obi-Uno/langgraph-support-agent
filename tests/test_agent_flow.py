@@ -670,6 +670,32 @@ def test_tool_call_written_as_text_is_not_shown_to_the_customer():
     assert flagged == 1  # and it's visible in the audit trail for diagnosis
 
 
+def test_greeting_is_answered_without_a_data_lookup():
+    """A greeting should get a friendly reply, not the customer's order history.
+    Scripted here because the guarantee we can enforce is that a no-tool reply
+    reaches the customer intact -- the prompt is what keeps 'hi' out of the tool
+    loop, and this pins the expected shape."""
+    from app.agent import build_graph as bg
+
+    fake_llm = FakeToolCallingLLM([AIMessage(content="Hi! How can I help you today?")])
+    graph = bg(llm_client=fake_llm, checkpointer=MemorySaver())
+
+    result = run_agent("hey", session_id="s26", graph=graph)
+
+    assert result["reply"] == "Hi! How can I help you today?"
+    assert fake_llm.call_count == 1  # no tool loop
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    tool_calls = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s26", AuditLog.event_type == "tool_call")
+        .count()
+    )
+    db.close()
+    assert tool_calls == 0
+
+
 def test_thought_prefix_never_reaches_the_customer():
     """Asking for a rationale before tool use tempts the model to label its final
     answer "Thought: ...". Reasoning is for the audit trail, not the customer."""
