@@ -9,3 +9,6 @@ pytest-cache-files-*/
 venv/
 .claude/
 .DS_Store
+
+# personal notes, not part of the project
+DEMO_SCRIPT.md
