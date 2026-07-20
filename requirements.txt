@@ -6,6 +6,7 @@ langchain-core==0.3.75
 langchain-anthropic==0.2.3
 langchain-google-genai==2.1.12
 langchain-groq==0.3.8
+langchain-openai==0.2.14
 scikit-learn==1.5.2
 pydantic==2.9.2
 python-dotenv==1.0.1

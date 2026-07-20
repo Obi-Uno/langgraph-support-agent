@@ -59,7 +59,13 @@ _DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
     "groq": "llama-3.3-70b-versatile",
     "anthropic": "claude-haiku-4-5-20251001",
+    # OpenRouter is OpenAI-compatible and meters its free tier in REQUESTS
+    # rather than tokens, which suits a public demo far better than a token cap.
+    # Any ":free" model id works; it must support tool calling.
+    "openrouter": "nvidia/nemotron-3-super-120b-a12b:free",
 }
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # `or` (not a getenv default) so the blank AGENT_MODEL= line in .env still
 # falls back to the provider default.
 MODEL_NAME = os.getenv("AGENT_MODEL") or _DEFAULT_MODELS.get(LLM_PROVIDER, _DEFAULT_MODELS["gemini"])
@@ -71,8 +77,21 @@ _GUARD_MODELS = {
     "gemini": "gemini-2.5-flash-lite",
     "groq": "llama-3.1-8b-instant",
     "anthropic": "claude-haiku-4-5-20251001",
+    "openrouter": "nvidia/nemotron-3-super-120b-a12b:free",
 }
 GUARD_MODEL_NAME = os.getenv("GUARD_MODEL") or _GUARD_MODELS.get(LLM_PROVIDER, _GUARD_MODELS["gemini"])
+
+
+def _build_openrouter_llm(model_name):
+    """OpenRouter speaks the OpenAI protocol, so the OpenAI client works against
+    its base URL. Kept separate because the key comes from OPENROUTER_API_KEY."""
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        model=model_name,
+        temperature=0,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=os.getenv("OPENROUTER_API_KEY", ""),
+    )
 
 
 def _build_default_llm():
@@ -84,6 +103,8 @@ def _build_default_llm():
     if LLM_PROVIDER == "groq":
         from langchain_groq import ChatGroq
         return ChatGroq(model=MODEL_NAME, temperature=0)
+    if LLM_PROVIDER == "openrouter":
+        return _build_openrouter_llm(MODEL_NAME)
     from langchain_google_genai import ChatGoogleGenerativeAI
     return ChatGoogleGenerativeAI(model=MODEL_NAME, temperature=0)
 
@@ -96,6 +117,8 @@ def _build_guard_llm():
     if LLM_PROVIDER == "groq":
         from langchain_groq import ChatGroq
         return ChatGroq(model=GUARD_MODEL_NAME, temperature=0)
+    if LLM_PROVIDER == "openrouter":
+        return _build_openrouter_llm(GUARD_MODEL_NAME)
     from langchain_google_genai import ChatGoogleGenerativeAI
     return ChatGoogleGenerativeAI(model=GUARD_MODEL_NAME, temperature=0)
 
