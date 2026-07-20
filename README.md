@@ -12,7 +12,7 @@ left to the model's judgement.
 
 **Live demo:** https://support-agent-demo.onrender.com — free tier, first
 request after idle takes ~30-60s to wake, then it's fast.
-**Walkthrough video:** _add your 60-90s Loom/YouTube link here_
+**Walkthrough video:** https://www.loom.com/share/a2e173c9b8f4425393f9e4cc6c6c2fd9
 
 ## What it does
 
