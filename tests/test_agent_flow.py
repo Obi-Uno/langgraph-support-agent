@@ -683,6 +683,64 @@ class _RateLimitedLLM:
         raise self.RateLimitError("Rate limit reached for model X (TPD)")
 
 
+def test_falls_back_to_second_provider_when_primary_is_rate_limited():
+    """A rate-limited primary should be retried on the spare provider, not
+    surfaced to the customer."""
+    from app.agent import build_graph as bg
+
+    spare = FakeToolCallingLLM([AIMessage(content="Your order is on the way!")])
+    graph = bg(llm_client=_RateLimitedLLM(), checkpointer=MemorySaver(), fallback_llm=spare)
+
+    result = run_agent("where is my order?", session_id="s29", graph=graph)
+
+    assert result["reply"] == "Your order is on the way!"
+    assert spare.call_count == 1
+
+    from app.db import SessionLocal, AuditLog
+    db = SessionLocal()
+    events = (
+        db.query(AuditLog)
+        .filter(AuditLog.session_id == "s29", AuditLog.event_type == "provider_fallback")
+        .count()
+    )
+    db.close()
+    assert events == 1  # the switch is recorded, not silent
+
+
+def test_fallback_is_not_used_for_ordinary_errors():
+    """Only rate limits fail over. A real bug must not be masked by a second
+    model quietly answering."""
+    from app.agent import build_graph as bg
+
+    class Boom:
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            raise ValueError("a genuine bug")
+
+    spare = FakeToolCallingLLM([AIMessage(content="should never be reached")])
+    graph = bg(llm_client=Boom(), checkpointer=MemorySaver(), fallback_llm=spare)
+
+    with pytest.raises(Exception):
+        run_agent("where is my order?", session_id="s30", graph=graph)
+    assert spare.call_count == 0
+
+
+def test_both_providers_rate_limited_still_degrades_gracefully():
+    """If the spare is exhausted too, the customer gets the busy message rather
+    than a 500."""
+    from app.agent import build_graph as bg
+
+    graph = bg(
+        llm_client=_RateLimitedLLM(),
+        checkpointer=MemorySaver(),
+        fallback_llm=_RateLimitedLLM(),
+    )
+    result = run_agent("where is my order?", session_id="s31", graph=graph)
+    assert "try again" in result["reply"].lower()
+
+
 def test_rate_limited_provider_returns_a_friendly_reply_not_a_500():
     """A provider quota error must not surface as an Internal Server Error --
     the widget should admit it's busy."""

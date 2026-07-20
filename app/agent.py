@@ -50,10 +50,15 @@ from app.db import SessionLocal, log_event, Order
 from app.identity import customer_for_session
 
 # LLM_PROVIDER swaps the model backend without touching any agent logic:
-# "groq", "gemini" or "anthropic". Keeping the provider behind one env var is
-# also what makes data-residency choices (EU-region endpoints, self-hosted
-# models) a config decision rather than a rewrite.
+# "groq", "gemini", "anthropic" or "openrouter". Keeping the provider behind one
+# env var is also what makes data-residency choices (EU-region endpoints,
+# self-hosted models) a config decision rather than a rewrite.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+
+# Optional second provider used ONLY when the primary reports a rate limit.
+# Free tiers are small and exhaust mid-conversation; two independent ones give
+# the demo somewhere to go instead of apologising to whoever is watching.
+FALLBACK_PROVIDER = os.getenv("FALLBACK_PROVIDER", "").lower().strip()
 
 _DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
@@ -92,6 +97,35 @@ def _build_openrouter_llm(model_name):
         base_url=OPENROUTER_BASE_URL,
         api_key=os.getenv("OPENROUTER_API_KEY", ""),
     )
+
+
+def _build_llm_for(provider, model_name):
+    """Build a chat client for any supported provider. Imports lazily, so you
+    don't need every SDK installed to run one of them."""
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(model=model_name, temperature=0)
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+        return ChatGroq(model=model_name, temperature=0)
+    if provider == "openrouter":
+        return _build_openrouter_llm(model_name)
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    return ChatGoogleGenerativeAI(model=model_name, temperature=0)
+
+
+def _build_fallback_llm():
+    """The secondary provider, or None when none is configured. Never raises:
+    a misconfigured fallback must not stop the primary from serving."""
+    if not FALLBACK_PROVIDER or FALLBACK_PROVIDER == LLM_PROVIDER:
+        return None
+    try:
+        model = os.getenv("FALLBACK_MODEL") or _DEFAULT_MODELS.get(FALLBACK_PROVIDER)
+        if not model:
+            return None
+        return _build_llm_for(FALLBACK_PROVIDER, model)
+    except Exception:  # noqa: BLE001 -- missing SDK/key for the spare is not fatal
+        return None
 
 
 def _build_default_llm():
@@ -243,7 +277,7 @@ def _verified_order_ids(messages) -> set:
     return verified
 
 
-def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
+def build_graph(llm_client=None, checkpointer=None, guard_llm=None, fallback_llm=None):
     """
     llm_client: inject a fake/test LLM to exercise the graph without a real API
     call (see tests/test_agent_flow.py). Defaults to the provider selected by
@@ -257,6 +291,13 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
     """
     llm = llm_client or _build_default_llm()
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
+    # Spare provider for rate-limit failover. Only built for the real client:
+    # an injected test LLM means the test is asserting on that LLM, not on a
+    # silent second one.
+    _fb = fallback_llm if fallback_llm is not None else (
+        _build_fallback_llm() if llm_client is None else None
+    )
+    fallback_with_tools = _fb.bind_tools(ALL_TOOLS) if _fb is not None else None
     tools_by_name = {t.name: t for t in ALL_TOOLS}
     checkpointer = checkpointer or _default_checkpointer()
     if guard_llm is None and llm_client is None:
@@ -301,7 +342,24 @@ def build_graph(llm_client=None, checkpointer=None, guard_llm=None):
         last_user_msg = _get_last_human_message(state)
         policy_context = retrieve_as_context(last_user_msg)
         system = SystemMessage(content=SYSTEM_PROMPT.format(policy_context=policy_context))
-        response = llm_with_tools.invoke([system, *state["messages"]])
+        prompt = [system, *state["messages"]]
+        try:
+            response = llm_with_tools.invoke(prompt)
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless it's a rate limit
+            # Only a rate limit earns a retry on the spare provider. Anything
+            # else is a real fault and must surface rather than be masked by a
+            # second model quietly answering.
+            if fallback_with_tools is None or not _is_rate_limited(exc):
+                raise
+            db = SessionLocal()
+            try:
+                log_event(
+                    db, state["session_id"], "provider_fallback",
+                    f"{LLM_PROVIDER} rate limited; retried on {FALLBACK_PROVIDER}. {str(exc)[:180]}",
+                )
+            finally:
+                db.close()
+            response = fallback_with_tools.invoke(prompt)
         # ReAct trace: when the model calls a tool, its content is the reasoning
         # behind that action (not a user reply) -- log it as a "reasoning" event.
         # On a final answer there are no tool calls and content IS the reply, so
